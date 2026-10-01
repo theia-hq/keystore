@@ -1,0 +1,25 @@
+# Fails CI on a layering leak so a future leak is caught by the machine, not by review.
+# A crate must not NAME a consumer-tier crate it does not depend on, a prime library must not
+# allude to a consumer CLI flag (`--for`/`--public`/`--peer`/`--authkey`/`--to`), and no file but a
+# CHANGELOG may name a layer that depends on this repo or use the org's name as its own word. Pure
+# sh + grep, no toolchain. The fixture runs the gate's pass and fail paths on throwaway trees so
+# its fail path cannot rot.
+# The check lives in scripts/layering-gate.sh. The same job runs scripts/prose-gate.sh, which fails
+# a process reference in anything a user reads.
+name: layering-gate
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: layering gate
+        run: sh scripts/layering-gate.sh .
+      - name: layering gate fixture
+        run: sh scripts/tests/layering-gate.sh
+      - name: process leaks
+        run: sh scripts/prose-gate.sh .

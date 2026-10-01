@@ -1,0 +1,43 @@
+[package]
+publish = false  # git-only for now, not published to crates.io
+name = "keystore"
+description = "Storage for a node's secret key: one key file, plain or sealed under a passphrase."
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.91"
+license = "MIT OR Apache-2.0"
+
+# The root package is the storage core, and the workspace is where a platform crate it calls lands
+# beside it, sharing these lints.
+[workspace]
+resolver = "3"
+
+[dependencies]
+argon2 = { version = "0.6", default-features = false, features = ["alloc", "zeroize"] }
+chacha20poly1305 = { version = "0.10", default-features = false }
+# `hazmat` for the expanded secret key: the public half of a seed without building a signing key,
+# since nothing here signs.
+ed25519-dalek = { version = "2", features = ["hazmat"] }
+getrandom = "0.4"
+icu_normalizer = { version = "2.1", default-features = false, features = ["compiled_data"] }
+thiserror = "2"
+zeroize = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[lints]
+workspace = true
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+wildcard_imports = "deny"
+std_instead_of_core = "warn"
+undocumented_unsafe_blocks = "deny"
+
+[workspace.lints.rust]
+unused_must_use = "deny"
+# Allowed back per-file, and only on the one `geteuid` call in `src/uid.rs`, so the next `unsafe`
+# anywhere in the workspace has to be argued rather than merely written.
+unsafe_code = "deny"

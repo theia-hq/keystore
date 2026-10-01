@@ -1,0 +1,67 @@
+# Build, test, and lint every PR and push to main in the PATCH-FREE (shipping-form) environment, so a
+# stale sibling rev pin or a lock that does not resolve fails HERE, not at the tag. --locked is correct on
+# PR and does NOT reopen decision (A) (which governs the tag build, notes/02-DECISIONS.md): lock-guard.sh
+# keeps the committed lock in shipping-form, so --locked in the patch-free checkout proves it resolves.
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: lock guard
+        run: sh scripts/lock-guard.sh .
+      - name: build
+        run: cargo build --locked
+      - name: test
+        run: cargo test --locked
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: cargo-deny (sources)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check sources
+  # The platform job: build and run every test on macOS, where the platform locks live, so a change
+  # that breaks there fails here and not on a user's Mac.
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: build
+        run: cargo build --locked
+      - name: test
+        run: cargo test --locked
+  # Check with the oldest toolchain the manifest claims (rust-version), so a dependency or a language
+  # feature that needs a newer compiler fails here instead of in a user's build. The version is read from
+  # Cargo.toml, so this job is the same in every repo.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: read rust-version
+        id: msrv
+        run: |
+          v=$(sed -n 's/^rust-version *= *"\([^"]*\)".*/\1/p' Cargo.toml)
+          test -n "$v" || { echo "no rust-version in Cargo.toml"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - name: check
+        run: cargo +${{ steps.msrv.outputs.version }} check --all-targets --locked
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - name: fmt check
+        run: cargo +nightly fmt --check
