@@ -5,10 +5,9 @@ use std::path::{Path, PathBuf};
 
 use zeroize::Zeroizing;
 
-use crate::envelope::{self, Envelope, Parsed};
+use crate::envelope::{self, Envelope, Opened, Parsed};
 use crate::error::{CryptoError, Error, FormatError};
 use crate::kind::Kind;
-use crate::lock::FileKey;
 use crate::method::{Method, NewLock, Protection, Unlock};
 use crate::public_key::PublicKey;
 use crate::secret::Secret;
@@ -266,7 +265,7 @@ impl KeyFile {
             .without_lock(&opened, method)
             .map_err(|source| real.crypto(source))?;
         match rewritten {
-            Some(image) => real.replace(&image, Proof::FileKey(&opened.file_key), public, &seen),
+            Some(image) => real.replace(&image, Proof::Opened(&opened), public, &seen),
             // The last lock is gone, so the file is written plain. A root never gets here, since its
             // passphrase lock cannot be removed; the plain write still goes through the one check
             // that refuses a plain root.
@@ -573,8 +572,8 @@ impl Staged<'_> {
         let opened = match (staged.load(), proof) {
             (Ok(Some(Stored::Plain(secret))), Proof::Plain) => Some(secret),
             (Ok(Some(Stored::Locked(locked))), Proof::Lock(with)) => locked.unlock(with).ok(),
-            (Ok(Some(Stored::Locked(locked))), Proof::FileKey(file_key)) => {
-                locked.envelope().open_with(file_key).ok()
+            (Ok(Some(Stored::Locked(locked))), Proof::Opened(opened)) => {
+                locked.envelope().reopen(opened).ok()
             }
             _ => None,
         };
@@ -641,9 +640,9 @@ enum Proof<'a> {
     Plain,
     /// This lock opens it: the one just added, or the one a new file is written under.
     Lock(Unlock<'a>),
-    /// The file key opens its seed. A lock removal proves the new form this way, because the lock
-    /// that opened the old form may be the one it removed.
-    FileKey(&'a FileKey),
+    /// The file key of this unlock opens its seed. A lock removal proves the new form this way,
+    /// because the lock that opened the old form may be the one it removed.
+    Opened(&'a Opened),
 }
 
 impl<'a> Proof<'a> {

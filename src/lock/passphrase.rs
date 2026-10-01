@@ -86,7 +86,7 @@ impl PassphraseParams {
 
     /// The key `passphrase` makes under these parameters.
     pub(crate) fn kek(&self, passphrase: &Passphrase) -> Result<Kek, CryptoError> {
-        self.cost.derive(passphrase, &self.salt).map(Kek)
+        self.cost.derive(passphrase, &self.salt)
     }
 
     /// The parameters, byte for byte as they sit in the file.
@@ -172,11 +172,7 @@ impl Cost {
             && self.lanes <= Self::LANES.1
     }
 
-    fn derive(
-        self,
-        passphrase: &Passphrase,
-        salt: &[u8],
-    ) -> Result<Zeroizing<[u8; Kek::LEN]>, CryptoError> {
+    fn derive(self, passphrase: &Passphrase, salt: &[u8]) -> Result<Kek, CryptoError> {
         let params = Params::new(self.memory_kib, self.passes, self.lanes, Some(Kek::LEN))
             .map_err(CryptoError::kdf)?;
         // The work memory is ours, not argon2's, so it is wiped when it drops: argon2 frees its own
@@ -189,16 +185,17 @@ impl Cost {
             .try_reserve_exact(count)
             .map_err(CryptoError::memory)?;
         blocks.resize(count, Block::default());
-        let mut key = Zeroizing::new([0; Kek::LEN]);
+        // Derived straight into the key's heap home, so no copy of it is left in this frame.
+        let mut kek = Kek::zeroed();
         Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
             .hash_password_into_with_memory(
                 passphrase.as_bytes(),
                 salt,
-                &mut key[..],
+                &mut kek.fill()[..],
                 &mut blocks[..],
             )
             .map_err(CryptoError::kdf)?;
-        Ok(key)
+        Ok(kek)
     }
 }
 

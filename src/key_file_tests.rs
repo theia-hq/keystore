@@ -406,7 +406,7 @@ fn a_second_lock_of_one_method_replaces_it() {
     let (old, new) = (passphrase("old"), passphrase("new"));
     let (file, secret) = sealed_file(&dir, [6; 32], &old);
     let before = bytes(&file);
-    let file_key = *locked(&file).open(with(&old)).unwrap().file_key.bytes();
+    let file_key = *locked(&file).open(with(&old)).unwrap().file_key().bytes();
 
     file.add_lock(Some(with(&old)), lock(&new)).unwrap();
     let after = bytes(&file);
@@ -421,7 +421,7 @@ fn a_second_lock_of_one_method_replaces_it() {
     let opened = locked.open(with(&new)).unwrap();
     assert_eq!(opened.secret.public_key(), secret.public_key());
     // The file key is the file's for life: the new lock wraps the same one.
-    assert_eq!(opened.file_key.bytes(), &file_key);
+    assert_eq!(opened.file_key().bytes(), &file_key);
     // The lock's salt and nonce, and the seed's nonce, are drawn afresh: none is reused.
     for (field, range) in [
         ("salt", 59..75),

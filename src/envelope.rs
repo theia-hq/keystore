@@ -134,9 +134,21 @@ pub(crate) struct Envelope {
 }
 
 /// A sealed file opened: the seed, and the file key a lock change re-wraps.
+///
+/// The file key is a private field, so only this module reads it: a lock change hands the whole
+/// `Opened` back here rather than taking the key out. A lock method, which must never hold the file
+/// key, cannot name it even when it is handed an `Opened`.
 pub(crate) struct Opened {
     pub(crate) secret: Secret,
-    pub(crate) file_key: FileKey,
+    file_key: FileKey,
+}
+
+impl Opened {
+    /// The file key, for the tests that pin it stays the file's for life.
+    #[cfg(test)]
+    pub(crate) const fn file_key(&self) -> &FileKey {
+        &self.file_key
+    }
 }
 
 impl Envelope {
@@ -239,8 +251,14 @@ impl Envelope {
         Ok(Opened { secret, file_key })
     }
 
+    /// Open the seed with the file key another unlock of this file's key already holds: how a lock
+    /// removal proves its new form, since the lock that opened the old form may be the one removed.
+    pub(crate) fn reopen(&self, opened: &Opened) -> Result<Secret, Refusal> {
+        self.open_with(&opened.file_key)
+    }
+
     /// Open the seed with a file key already in hand, and hold it to the header's public key.
-    pub(crate) fn open_with(&self, file_key: &FileKey) -> Result<Secret, Refusal> {
+    fn open_with(&self, file_key: &FileKey) -> Result<Secret, Refusal> {
         let seed = match cipher::open(
             file_key.bytes(),
             &self.seed_nonce,

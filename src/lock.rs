@@ -112,11 +112,29 @@ impl FileKey {
 
 /// A key-encryption key: what a method makes from its caller's input and its stored parameters, and
 /// the only thing it hands back. It wraps one file key, and is wiped when it drops.
-pub(crate) struct Kek(pub(crate) Zeroizing<[u8; Kek::LEN]>);
+///
+/// Boxed like [`FileKey`], because with the file it opens the file key: it moves from the method that
+/// makes it to the wrap that uses it, and a move copies the pointer, never the key. A method fills it
+/// in place ([`zeroed`](Self::zeroed), then [`fill`](Self::fill)), so it never exists on the stack.
+pub(crate) struct Kek(Box<Zeroizing<[u8; Kek::LEN]>>);
 
 impl Kek {
     /// A cipher key's length: the cipher it keys is the one every seal here uses.
     pub(crate) const LEN: usize = KEY_LEN;
+
+    /// An all-zero key in its heap home, for a method to fill.
+    pub(crate) fn zeroed() -> Self {
+        Self(Box::new(Zeroizing::new([0; Self::LEN])))
+    }
+
+    /// The buffer a method writes the key into.
+    pub(crate) fn fill(&mut self) -> &mut [u8; Self::LEN] {
+        &mut self.0
+    }
+
+    fn bytes(&self) -> &[u8; Self::LEN] {
+        &self.0
+    }
 }
 
 /// One lock's parameters, per method: the public inputs its method needs to make the same [`Kek`]
@@ -218,7 +236,7 @@ impl Lock {
             nonce,
             wrapped: [0; SEALED_LEN],
         };
-        lock.wrapped = cipher::seal(&kek.0, &nonce, &lock.aad(header), file_key.bytes())?;
+        lock.wrapped = cipher::seal(kek.bytes(), &nonce, &lock.aad(header), file_key.bytes())?;
         Ok(lock)
     }
 
@@ -236,7 +254,7 @@ impl Lock {
         header: &[u8; HEADER_LEN],
     ) -> Result<FileKey, Refusal> {
         let kek = self.params.kek(with)?;
-        match cipher::open(&kek.0, &self.nonce, &self.aad(header), &self.wrapped) {
+        match cipher::open(kek.bytes(), &self.nonce, &self.aad(header), &self.wrapped) {
             Ok(file_key) => Ok(FileKey::copy_of(&file_key)),
             Err(Failed::Tag) => Err(Refusal::Unlock),
             Err(Failed::Crypto(source)) => Err(Refusal::Crypto(source)),

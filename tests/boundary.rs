@@ -282,11 +282,12 @@ fn the_key_derivation_runs_in_memory_this_crate_wipes() {
 
 /// Wiping on drop cannot be watched from a test: reading freed memory is undefined behaviour, so
 /// any test that claimed to see the wipe would be reporting nothing. What CAN be pinned is that the
-/// owners are built to wipe: the seed's box has a `Drop` that zeroizes it, and the passphrase lives
-/// in a `Zeroizing` buffer.
+/// owners are built to wipe: the seed's box has a `Drop` that zeroizes it, the passphrase lives in a
+/// `Zeroizing` buffer, and the file key and the key-encryption key live in a boxed `Zeroizing`, so a
+/// move copies a pointer and never the key. The key-encryption key is derived straight into its box.
 #[test]
 #[allow(clippy::expect_used)]
-fn the_seed_and_passphrase_owners_are_built_to_wipe() {
+fn the_secret_owners_are_built_to_wipe() {
     let read = |name: &str| {
         code_only(&fs::read_to_string(crate_dir().join("src").join(name)).expect("readable"))
     };
@@ -301,14 +302,116 @@ fn the_seed_and_passphrase_owners_are_built_to_wipe() {
         "`Secret`'s `Drop` must zeroize the seed"
     );
     assert!(read("passphrase.rs").contains("pub struct Passphrase(Zeroizing<Vec<u8>>);"));
+    let lock = read("lock.rs");
+    assert!(
+        lock.contains("pub(crate) struct FileKey(Box<Zeroizing<[u8; KEY_LEN]>>);"),
+        "the file key must live in a boxed `Zeroizing`"
+    );
+    assert!(
+        lock.contains("pub(crate) struct Kek(Box<Zeroizing<[u8; Kek::LEN]>>);"),
+        "the key-encryption key must live in a boxed `Zeroizing`"
+    );
+    let method = read("lock/passphrase.rs");
+    assert!(
+        method.contains("let mut kek = Kek::zeroed();") && method.contains("&mut kek.fill()[..]"),
+        "the passphrase method must derive its key straight into the key's box"
+    );
 }
 
-/// A method makes a key-encryption key and nothing else: the file key, the seed, and the cipher that
-/// wraps one under the other belong to the core in `lock.rs`. Every method module lives under
-/// `lock/`, and none may name them, so no method's code can take, return, or hold the file key.
+/// The crate paths a method module may name: its errors, the key it makes, and its caller's input.
+const METHOD_CRATE_PATHS: &[&str] = &["crate::error::", "crate::lock::Kek", "crate::passphrase::"];
+
+/// The external crates a method module may name: its derivation and its randomness, and the wipe.
+const METHOD_CRATES: &[&str] = &["argon2", "core", "getrandom", "zeroize"];
+
+/// Names any module may start a path from without importing them.
+const PRELUDE: &[&str] = &[
+    "Self", "Box", "Option", "Result", "Vec", "u8", "u16", "u32", "u64", "usize",
+];
+
+/// Every `use` declaration in `code`, joined onto one line.
+fn uses(code: &str) -> Vec<String> {
+    let mut uses = Vec::new();
+    let mut open: Option<String> = None;
+    for line in code.lines().map(str::trim) {
+        if let Some(mut text) = open.take() {
+            text.push_str(line);
+            if line.ends_with(';') {
+                uses.push(text);
+            } else {
+                open = Some(text);
+            }
+        } else if line.starts_with("use ") || line.starts_with("pub(crate) use ") {
+            if line.ends_with(';') {
+                uses.push(line.to_owned());
+            } else {
+                open = Some(line.to_owned());
+            }
+        }
+    }
+    uses
+}
+
+/// The names a `use` brings into scope: its last segment, each name in its braces, or an alias.
+fn imported(declaration: &str) -> Vec<String> {
+    let path = declaration
+        .trim_end_matches(';')
+        .rsplit_once(' ')
+        .map_or(declaration, |(_, path)| path);
+    let tail = declaration.split_once('{').map_or_else(
+        || path.rsplit("::").next().unwrap_or(path),
+        |(_, braced)| braced,
+    );
+    tail.trim_end_matches(['}', ';'])
+        .split(',')
+        .map(|name| name.rsplit(' ').next().unwrap_or(name).trim().to_owned())
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+/// The names `code` declares itself: its types, functions, and constants.
+fn declared(code: &str) -> Vec<String> {
+    let words: Vec<&str> = code
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .collect();
+    words
+        .windows(2)
+        .filter(|pair| ["struct", "enum", "fn", "const", "trait", "type"].contains(&pair[0]))
+        .map(|pair| pair[1].to_owned())
+        .collect()
+}
+
+/// Each path in `code` from its first segment: `(root, the whole path)`.
+fn paths(code: &str) -> Vec<(String, String)> {
+    let ident = |c: char| c.is_alphanumeric() || c == '_';
+    let mut found = Vec::new();
+    let mut at = 0;
+    while let Some(offset) = code[at..].find("::") {
+        let colons = at + offset;
+        let start = code[..colons]
+            .rfind(|c: char| !ident(c))
+            .map_or(0, |before| before + 1);
+        let continues = code[..start].ends_with("::");
+        let root = &code[start..colons];
+        if !root.is_empty() && !continues {
+            let end = code[colons..]
+                .find(|c: char| !(ident(c) || c == ':'))
+                .map_or(code.len(), |after| colons + after);
+            found.push((root.to_owned(), code[start..end].to_owned()));
+        }
+        at = colons + 2;
+    }
+    found
+}
+
+/// A method makes a key-encryption key and nothing else: the file key, the seed, and the cipher
+/// that wraps one under the other belong to the core. Every method module lives under `lock/`, and
+/// what it may name is an allow-list, so a method that reaches for anything else (the file key
+/// through any type that holds it, the cipher's crate, a parent module through `super`) fails here,
+/// not in review.
 #[test]
+#[allow(clippy::expect_used)]
 fn no_method_sees_the_file_key() {
-    const CORE_ONLY: &[&str] = &["FileKey", "Secret", "cipher", "seal", "open"];
     let methods: Vec<(String, String)> = shipped_sources()
         .into_iter()
         .filter(|(name, _)| name.starts_with("lock/"))
@@ -317,13 +420,72 @@ fn no_method_sees_the_file_key() {
         methods.iter().any(|(name, _)| name == "lock/passphrase.rs"),
         "the scan did not reach the passphrase method"
     );
-    for (name, source) in methods {
-        let code = code_only(&source);
+    for (name, source) in &methods {
+        let code = code_only(source);
         for token in code.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
             assert!(
-                !CORE_ONLY.contains(&token),
-                "{name} names `{token}`, which only the core may hold"
+                !["super", "extern"].contains(&token),
+                "{name} names `{token}`, a way around the allow-list"
             );
         }
+        assert!(
+            !code.contains("self::"),
+            "{name} names a path through `self::`"
+        );
+        let mut known: Vec<String> = declared(&code);
+        for declaration in uses(&code) {
+            let path = declaration
+                .trim_start_matches("pub(crate) ")
+                .trim_start_matches("use ");
+            let allowed = METHOD_CRATE_PATHS.iter().any(|ok| path.starts_with(ok))
+                || METHOD_CRATES
+                    .iter()
+                    .any(|ok| path.starts_with(&format!("{ok}::")));
+            assert!(
+                allowed,
+                "{name}: `{declaration}` is outside what a method may name"
+            );
+            known.extend(imported(&declaration));
+        }
+        for (root, path) in paths(&code) {
+            if root == "crate" {
+                assert!(
+                    METHOD_CRATE_PATHS.iter().any(|ok| path.starts_with(ok)),
+                    "{name}: `{path}` is outside what a method may name"
+                );
+                continue;
+            }
+            assert!(
+                known.contains(&root)
+                    || PRELUDE.contains(&root.as_str())
+                    || METHOD_CRATES.contains(&root.as_str()),
+                "{name}: `{path}` starts from `{root}`, which a method may not name"
+            );
+        }
+    }
+    // Every method the core reaches is one this scan read: each `Params` variant's payload is a type
+    // declared under `lock/`, so a method module placed anywhere else cannot be wired in unseen.
+    let core = code_only(&fs::read_to_string(crate_dir().join("src/lock.rs")).expect("readable"));
+    let params = core
+        .split("pub(crate) enum Params {")
+        .nth(1)
+        .and_then(|rest| rest.split('}').next())
+        .expect("the core declares `Params`");
+    let payloads: Vec<&str> = params
+        .split(['(', ')'])
+        .skip(1)
+        .step_by(2)
+        .map(str::trim)
+        .collect();
+    assert!(!payloads.is_empty(), "the scan found no method in `Params`");
+    for payload in payloads {
+        assert!(
+            methods
+                .iter()
+                .any(|(_, source)| declared(&code_only(source))
+                    .iter()
+                    .any(|name| name == payload)),
+            "`Params` reaches `{payload}`, which no module under lock/ declares"
+        );
     }
 }

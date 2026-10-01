@@ -24,3 +24,30 @@ fn a_seed_derives_the_rfc_8032_public_key() {
 fn distinct_seeds_derive_distinct_keys() {
     assert_ne!(PublicKey::of_seed(&[1; 32]), PublicKey::of_seed(&[2; 32]));
 }
+
+/// The expansion path computes what a signing key would: the key a consumer derives through
+/// `SigningKey` and the key this crate writes in a header are the same bytes. A signing key is built
+/// here, in a test, and never in the shipped code.
+#[test]
+fn the_derived_key_is_the_signing_key_s_verifying_key() {
+    let mut seeds = vec![
+        [0; 32],
+        [0xff; 32],
+        core::array::from_fn(|at| at as u8),
+        RFC_8032_SECRET,
+    ];
+    for _ in 0..16 {
+        let mut seed = [0; 32];
+        getrandom::fill(&mut seed).unwrap();
+        seeds.push(seed);
+    }
+    for seed in seeds {
+        assert_eq!(
+            PublicKey::of_seed(&seed).bytes(),
+            &ed25519_dalek::SigningKey::from_bytes(&seed)
+                .verifying_key()
+                .to_bytes(),
+            "the keys differ for seed {seed:?}"
+        );
+    }
+}
