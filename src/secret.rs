@@ -15,8 +15,7 @@ pub(crate) const SEED_LEN: usize = PublicKey::LEN;
 /// no way to take the seed out by value: no `into_bytes`, no `to_bytes`, no `Clone`, no `Deref`, no
 /// `AsRef`. A consumer that needs the raw bytes borrows them for the length of a closure
 /// ([`with_bytes`](Self::with_bytes)). One that must hold them across an `.await` holds the `Secret`
-/// instead, and passes the borrow to something that takes what it needs before its future starts
-/// (a bind that copies the seed into its own state at the call does).
+/// instead, and passes the borrow to something that takes what it needs before its future starts.
 ///
 /// Each refusal below names the error it must fail with, so it fails for the reason it states and
 /// not for a typo. Only a nightly `rustdoc` checks the codes; a stable one checks only that the

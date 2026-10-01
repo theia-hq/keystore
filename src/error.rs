@@ -71,7 +71,7 @@ pub enum Error {
         path: PathBuf,
     },
     /// A sealed file unlocked, but its header names a different public key than the seed it seals.
-    #[error("the key file {} names one public key in its header and seals another", path.display())]
+    #[error("the key file {} seals a different key than its header names", path.display())]
     Inconsistent {
         /// The key file.
         path: PathBuf,

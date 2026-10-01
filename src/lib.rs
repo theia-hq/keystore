@@ -21,7 +21,7 @@
 //! ([`Secret::with_bytes`]), and every buffer that holds it here is wiped on drop. What this cannot
 //! stop is a copy the caller makes on purpose: a seed is a `Copy` array, so
 //! `secret.with_bytes(|seed| *seed)` compiles to a bare `[u8; 32]` that nothing wipes. Hand the borrow
-//! on instead: a caller's `bind` that takes `&[u8; 32]` gets `secret.with_bytes(bind)`, and no copy.
+//! on instead: `secret.with_bytes(f)`, where `f` takes `&[u8; 32]`, makes no copy.
 
 mod cipher;
 mod envelope;
