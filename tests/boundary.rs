@@ -82,14 +82,36 @@ fn code_only(source: &str) -> String {
         .join("\n")
 }
 
+/// Every line of the manifest's dependency sections, for the source checks.
+#[allow(clippy::expect_used)]
+fn dependency_lines(manifest: &Path) -> Vec<String> {
+    let text = fs::read_to_string(manifest).expect("the manifest is readable");
+    let mut lines = Vec::new();
+    let mut inside = false;
+    for line in text.lines().map(str::trim) {
+        if line.starts_with('[') {
+            inside = line.ends_with("dependencies]");
+            continue;
+        }
+        if inside && !line.is_empty() && !line.starts_with('#') {
+            lines.push(line.to_owned());
+        }
+    }
+    lines
+}
+
+/// The crate stores a key and names nobody's identity type: every dependency is a published crate
+/// from the registry, so nothing of the family it serves can sit under it, and a key format change
+/// never waits on another repository's release.
 #[test]
-fn the_storage_core_depends_on_the_node_identity_and_crypto_only() {
+fn the_storage_core_depends_on_registry_crates_only() {
+    let manifest = crate_dir().join("Cargo.toml");
     assert_eq!(
-        manifest_keys(&crate_dir().join("Cargo.toml"), "[dependencies]"),
+        manifest_keys(&manifest, "[dependencies]"),
         [
             "argon2",
-            "bifrost-core",
             "chacha20poly1305",
+            "ed25519-dalek",
             "getrandom",
             "icu_normalizer",
             "thiserror",
@@ -98,24 +120,24 @@ fn the_storage_core_depends_on_the_node_identity_and_crypto_only() {
     );
     // `libc` for the effective uid the owner check compares against, and nothing else.
     assert_eq!(
-        manifest_keys(
-            &crate_dir().join("Cargo.toml"),
-            "[target.'cfg(unix)'.dependencies]"
-        ),
+        manifest_keys(&manifest, "[target.'cfg(unix)'.dependencies]"),
         ["libc"]
     );
-}
-
-#[test]
-fn the_facade_does_not_carry_the_keystore() {
-    let facade = crate_dir().join("../bifrost/Cargo.toml");
-    let dependencies = manifest_keys(&facade, "[dependencies]");
+    // A git or path source is how a crate of the family would arrive: none may.
+    let lines = dependency_lines(&manifest);
     assert!(
-        dependencies.iter().any(|key| key == "bifrost-core"),
-        "{} is not the facade manifest this test means to read",
-        facade.display()
+        lines.len() >= 8,
+        "the scan found too few dependency lines to mean anything"
     );
-    assert!(!dependencies.iter().any(|key| key == "keystore"));
+    for line in lines {
+        let spec: String = line.split_whitespace().collect();
+        assert!(
+            !["git=", "path=", "workspace="]
+                .iter()
+                .any(|source| spec.contains(source)),
+            "`{line}` is a dependency from outside the registry"
+        );
+    }
 }
 
 #[test]

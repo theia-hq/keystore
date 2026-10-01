@@ -1,15 +1,13 @@
-use bifrost_core::{CryptoKind, KeyError, NodeId};
 use zeroize::Zeroizing;
 
-use super::{
-    AT_PUBLIC, Envelope, HEADER_LEN, Opened, Parsed, Refusal, SIGNATURE, assemble, header, parse,
-};
+use super::{Envelope, HEADER_LEN, Opened, Parsed, Refusal, SIGNATURE, assemble, header, parse};
 use crate::error::FormatError;
 use crate::kind::Kind;
 use crate::lock::passphrase::{BODY_LEN, Cost, PassphraseLock};
 use crate::lock::{FileKey, Lock};
 use crate::method::{Method, NewLock, Unlock};
 use crate::passphrase::Passphrase;
+use crate::public_key::PublicKey;
 use crate::secret::Secret;
 
 /// A version 2 sealed device key file, byte for byte. THE format test: a file this build wrote must
@@ -177,7 +175,7 @@ fn open(envelope: &Envelope, under: &Passphrase) -> Result<Opened, Refusal> {
 /// header naming `public`, at `cost`.
 fn build(
     kind: Kind,
-    public: NodeId,
+    public: PublicKey,
     secret: &Secret,
     under: &Passphrase,
     cost: Cost,
@@ -202,7 +200,7 @@ fn build(
 fn floor_image(secret: &Secret, under: &Passphrase) -> Vec<u8> {
     build(
         Kind::Device,
-        secret.node_id(),
+        secret.public_key(),
         secret,
         under,
         Cost::FLOOR,
@@ -214,17 +212,13 @@ fn floor_image(secret: &Secret, under: &Passphrase) -> Vec<u8> {
 fn the_golden_vector_opens_to_its_seed() {
     let envelope = sealed(&GOLDEN);
     assert_eq!(envelope.methods().collect::<Vec<_>>(), [Method::Passphrase]);
-    assert_eq!(
-        envelope.node_id(),
-        NodeId::try_new(CryptoKind::Ed25519, GOLDEN_PUBLIC)
-            .expect("a golden public key a secret derived parses")
-    );
+    assert_eq!(envelope.public_key().bytes(), &GOLDEN_PUBLIC);
     let opened = open(&envelope, &golden_passphrase()).unwrap();
     opened
         .secret
         .with_bytes(|seed| assert_eq!(seed, &golden_seed()));
     assert_eq!(opened.file_key.bytes(), &golden_file_key());
-    assert_eq!(opened.secret.node_id(), envelope.node_id());
+    assert_eq!(opened.secret.public_key(), envelope.public_key());
 }
 
 #[test]
@@ -232,7 +226,7 @@ fn this_build_writes_the_golden_vector_byte_for_byte() {
     let secret = Secret::copy_of(&golden_seed());
     let image = build(
         Kind::Device,
-        secret.node_id(),
+        secret.public_key(),
         &secret,
         &golden_passphrase(),
         golden_cost(),
@@ -262,7 +256,7 @@ fn this_build_writes_the_golden_root_vector_byte_for_byte() {
     let secret = Secret::copy_of(&golden_seed());
     let image = build(
         Kind::Root,
-        secret.node_id(),
+        secret.public_key(),
         &secret,
         &golden_passphrase(),
         golden_cost(),
@@ -461,27 +455,6 @@ fn any_edit_to_a_lock_fails_the_whole_file() {
 }
 
 #[test]
-fn a_header_naming_another_node_is_refused_even_with_the_right_passphrase() {
-    let secret = Secret::copy_of(&golden_seed());
-    let other = Secret::copy_of(&[7; 32]);
-    let under = passphrase("correct horse battery staple");
-    let image = build(
-        Kind::Device,
-        other.node_id(),
-        &secret,
-        &under,
-        Cost::FLOOR,
-        golden_salt(),
-    );
-    let envelope = sealed(&image);
-    assert_eq!(envelope.node_id(), other.node_id());
-    assert!(matches!(
-        open(&envelope, &under),
-        Err(Refusal::Inconsistent)
-    ));
-}
-
-#[test]
 fn a_plain_file_is_exactly_32_bytes() {
     assert!(matches!(parse(&[9; 32], Kind::Device), Ok(Parsed::Plain(seed)) if seed == &[9; 32]));
     for found in [0, 1, 31, 33, 218, 219, 220] {
@@ -524,20 +497,48 @@ fn an_unknown_version_is_named_before_its_length_is_judged() {
 }
 
 /// The public key the seed `[7; 32]` binds, plus the order-8 torsion point: canonical, not small-order,
-/// and a second spelling of that key. The same vector as the identity parse's own tests.
+/// and a second spelling of that key.
+#[rustfmt::skip]
 const TORSION_TWIN: [u8; 32] = [
     0x1f, 0x4f, 0x58, 0x0e, 0x73, 0xac, 0x20, 0x8f, 0x06, 0x76, 0x01, 0x90, 0xe9, 0xed, 0xc6, 0xf5,
     0x91, 0x67, 0x75, 0xda, 0xbd, 0x9c, 0x1c, 0xdc, 0xa3, 0x93, 0x17, 0x5c, 0x2d, 0x6d, 0x10, 0x83,
 ];
 
 #[test]
-fn a_key_file_naming_a_torsion_twin_is_refused_at_load() {
-    let mut image = GOLDEN;
-    image[AT_PUBLIC..HEADER_LEN].copy_from_slice(&TORSION_TWIN);
-    assert_eq!(
-        refusal(&image),
-        FormatError::PublicKey(KeyError::HasTorsion)
-    );
+fn a_header_that_does_not_match_the_seed_refuses_the_unlock() {
+    // Each header is written by this crate's own writer under the right passphrase, so the lock and
+    // the seed's seal both open, and only the compare against the seed's own key can refuse it. The
+    // header is bytes, so it parses whatever it names: another real key, a second spelling of the
+    // seed's own key, or bytes that are no key at all.
+    let secret = Secret::copy_of(&[7; 32]);
+    let under = passphrase("correct horse battery staple");
+    for (named, claimed) in [
+        ("another key", Secret::copy_of(&golden_seed()).public_key()),
+        ("a torsion twin of the seed's key", PublicKey(TORSION_TWIN)),
+        ("bytes that are no key", PublicKey([0xff; 32])),
+    ] {
+        let image = build(
+            Kind::Device,
+            claimed,
+            &secret,
+            &under,
+            Cost::FLOOR,
+            golden_salt(),
+        );
+        let envelope = sealed(&image);
+        assert_eq!(
+            envelope.public_key(),
+            claimed,
+            "{named} did not parse as bytes"
+        );
+        assert!(
+            matches!(open(&envelope, &under), Err(Refusal::Inconsistent)),
+            "a header naming {named} was not refused at the unlock"
+        );
+    }
+    // The same file with the seed's own key opens, so the refusals above are the compare's.
+    let image = floor_image(&secret, &under);
+    assert!(open(&sealed(&image), &under).is_ok());
 }
 
 #[test]

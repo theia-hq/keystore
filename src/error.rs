@@ -1,10 +1,9 @@
 use std::io;
 use std::path::PathBuf;
 
-use bifrost_core::{KeyError, NodeId};
-
 use crate::kind::Kind;
 use crate::method::Method;
+use crate::public_key::PublicKey;
 
 /// Why a key file could not be loaded, written, adopted, unlocked, or have its locks changed.
 ///
@@ -71,7 +70,7 @@ pub enum Error {
         /// The key file.
         path: PathBuf,
     },
-    /// A sealed file unlocked, but its header names a different node than the key it seals.
+    /// A sealed file unlocked, but its header names a different public key than the seed it seals.
     #[error("the key file {} names one node in its header and seals the key of another", path.display())]
     Inconsistent {
         /// The key file.
@@ -84,27 +83,32 @@ pub enum Error {
         path: PathBuf,
     },
     /// An adopt found a sealed file claiming the adopted key, and was given no passphrase to prove
-    /// the claim with. A sealed file's header names its node before it unlocks, but only the unlock
+    /// the claim with. A sealed file's header names its key before it unlocks, but only the unlock
     /// shows the file really holds that key.
+    ///
+    /// The message names no key: this crate has no text form for one, so the caller prints
+    /// `claimed` in its own.
     #[error(
-        "the key file {} is sealed and claims to hold {claimed}; adopting over it needs its passphrase to prove that",
+        "the key file {} is sealed and claims to hold the key; adopting over it needs its passphrase to prove that",
         path.display()
     )]
     Unconfirmed {
         /// The key file.
         path: PathBuf,
-        /// The node the file's header claims, which is also the node the adopt offered.
-        claimed: NodeId,
+        /// The public key the file's header claims, which is also the key the adopt offered.
+        claimed: PublicKey,
     },
     /// An adopt found a different key already stored at the path.
-    #[error("the key file {} already holds {existing}, not {incoming}", path.display())]
+    ///
+    /// The message names neither key, for the same reason as [`Error::Unconfirmed`].
+    #[error("the key file {} already holds a different key", path.display())]
     Different {
         /// The key file.
         path: PathBuf,
-        /// The node the file already holds; for a sealed file, the node its header claims.
-        existing: NodeId,
-        /// The node the adopt offered.
-        incoming: NodeId,
+        /// The public key the file already holds; for a sealed file, the key its header claims.
+        existing: PublicKey,
+        /// The public key the adopt offered.
+        incoming: PublicKey,
     },
     /// A write asked to store a root key plain. A root key is only ever written sealed: a plain one is
     /// every device it vouches for in one readable file.
@@ -277,9 +281,6 @@ pub enum FormatError {
         /// Parallel lanes.
         lanes: u32,
     },
-    /// The stored public key is not a usable ed25519 identity.
-    #[error("the stored public key is not a usable identity")]
-    PublicKey(#[source] KeyError),
 }
 
 /// Sealing or unlocking a key file could not run: the random source, the key derivation, or the

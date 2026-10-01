@@ -12,7 +12,7 @@
 //! | 0      | 8   | signature `KEYSTORE`                                             |
 //! | 8      | 1   | format version, `2`                                              |
 //! | 9      | 1   | file kind, `1` = a device key, `2` = a root key                  |
-//! | 10     | 32  | the seed's ed25519 public key, so a locked file names its node   |
+//! | 10     | 32  | the seed's ed25519 public key, so a locked file names its key    |
 //! | 42     | 1   | lock count `n`, at least 1                                       |
 //! | 43     | ..  | `n` locks, each: method (1), body length (2), body               |
 //! | ..     | 24  | XChaCha20-Poly1305 nonce                                         |
@@ -32,13 +32,12 @@
 //! authenticates, tells them apart. A plain file has no header and so no kind: it is the seed and
 //! nothing else.
 
-use bifrost_core::{CryptoKind, NodeId};
-
 use crate::cipher::{self, Failed, NONCE_LEN, SEALED_LEN};
 use crate::error::{CryptoError, FormatError};
 use crate::kind::Kind;
 use crate::lock::{FileKey, Lock};
 use crate::method::{Method, NewLock, Unlock};
+use crate::public_key::PublicKey;
 use crate::secret::{SEED_LEN, Secret};
 
 /// Every sealed key file opens with these bytes, at every version, forever.
@@ -85,7 +84,7 @@ const AT_KIND: usize = AT_VERSION + 1;
 pub(crate) const AT_PUBLIC: usize = AT_KIND + 1;
 /// The file's first bytes, which every lock's wrap authenticates. The lock count follows, and is
 /// deliberately outside: a lock stays valid as others are added or removed.
-pub(crate) const HEADER_LEN: usize = AT_PUBLIC + NodeId::KEY_LEN;
+pub(crate) const HEADER_LEN: usize = AT_PUBLIC + PublicKey::LEN;
 /// The lock count.
 pub(crate) const AT_COUNT: usize = HEADER_LEN;
 /// The first lock's record.
@@ -125,7 +124,7 @@ pub(crate) fn parse(bytes: &[u8], expected: Kind) -> Result<Parsed<'_>, FormatEr
 /// file.
 pub(crate) struct Envelope {
     header: [u8; HEADER_LEN],
-    node_id: NodeId,
+    public: PublicKey,
     /// In file order, at most one per method.
     locks: Vec<Lock>,
     /// Every byte before the seed's nonce: the seed seal's associated data.
@@ -161,12 +160,12 @@ impl Envelope {
                 });
             }
         }
-        // The stored public half names the node while the file is locked, so it is parsed like any key
-        // that enters from outside: a file cannot name an identity nobody could hold.
-        let mut public = [0; NodeId::KEY_LEN];
+        // The stored public half names the key while the file is locked. It is taken as bytes, not
+        // checked as a curve point: a caller that treats it as an identity checks it at its own edge,
+        // as it does every key that enters, and the unlock refuses a header that is not the seed's.
+        let mut public = [0; PublicKey::LEN];
         public.copy_from_slice(&header[AT_PUBLIC..]);
-        let node_id =
-            NodeId::try_new(CryptoKind::Ed25519, public).map_err(FormatError::PublicKey)?;
+        let public = PublicKey(public);
 
         let count = reader.byte()?;
         if count == 0 {
@@ -202,7 +201,7 @@ impl Envelope {
         }
         Ok(Self {
             header,
-            node_id,
+            public,
             locks,
             covered,
             seed_nonce,
@@ -218,7 +217,7 @@ impl Envelope {
         lock: NewLock<'_>,
     ) -> Result<Vec<u8>, CryptoError> {
         let file_key = FileKey::generate()?;
-        let header = header(kind, secret.node_id());
+        let header = header(kind, secret.public_key());
         let lock = Lock::wrap(lock, &file_key, &header)?;
         assemble(&header, &[&lock], &file_key, secret, &fresh_nonce()?)
     }
@@ -234,7 +233,7 @@ impl Envelope {
         Ok(Opened { secret, file_key })
     }
 
-    /// Open the seed with a file key already in hand, and hold it to the header's node.
+    /// Open the seed with a file key already in hand, and hold it to the header's public key.
     pub(crate) fn open_with(&self, file_key: &FileKey) -> Result<Secret, Refusal> {
         let seed = match cipher::open(
             file_key.bytes(),
@@ -248,9 +247,10 @@ impl Envelope {
         };
         let secret = Secret::copy_of(&seed);
         // The header's public key is authenticated, but only a writer holding the file key could have
-        // put a mismatched one there. A locked file must never name a node it would not unlock into,
-        // so the mismatch is refused rather than trusted either way.
-        if secret.node_id() != self.node_id {
+        // put a mismatched one there. A locked file must never name a key it would not unlock into,
+        // so the mismatch is refused rather than trusted either way. A byte compare, since the
+        // header is bytes and the seed's key is computed fresh.
+        if secret.public_key() != self.public {
             return Err(Refusal::Inconsistent);
         }
         Ok(secret)
@@ -318,9 +318,9 @@ impl Envelope {
         self.locks.iter().find(|lock| lock.method() == method)
     }
 
-    /// The node this file seals, read from the header without unlocking.
-    pub(crate) const fn node_id(&self) -> NodeId {
-        self.node_id
+    /// The public key this file claims to seal, read from the header without unlocking.
+    pub(crate) const fn public_key(&self) -> PublicKey {
+        self.public
     }
 }
 
@@ -338,12 +338,12 @@ pub(crate) enum Refusal {
 }
 
 /// The file's first bytes for a key of `kind` whose public key is `public`.
-pub(crate) fn header(kind: Kind, public: NodeId) -> [u8; HEADER_LEN] {
+pub(crate) fn header(kind: Kind, public: PublicKey) -> [u8; HEADER_LEN] {
     let mut header = [0; HEADER_LEN];
     header[..AT_VERSION].copy_from_slice(&SIGNATURE);
     header[AT_VERSION] = VERSION;
     header[AT_KIND] = kind.byte();
-    header[AT_PUBLIC..].copy_from_slice(public.key());
+    header[AT_PUBLIC..].copy_from_slice(public.bytes());
     header
 }
 

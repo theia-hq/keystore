@@ -1,12 +1,12 @@
 use core::fmt;
 
-use bifrost_core::NodeId;
 use zeroize::{Zeroize as _, ZeroizeOnDrop};
 
 use crate::error::CryptoError;
+use crate::public_key::PublicKey;
 
 /// The length of an ed25519 seed, which is also the length of a plain key file.
-pub(crate) const SEED_LEN: usize = NodeId::KEY_LEN;
+pub(crate) const SEED_LEN: usize = PublicKey::LEN;
 
 /// An ed25519 seed: the one secret a node holds.
 ///
@@ -94,10 +94,10 @@ impl Secret {
         Self(Box::new([0; SEED_LEN]))
     }
 
-    /// The node id this seed binds under: its ed25519 public key. Computed from the seed, never
-    /// stored beside it, so the two cannot disagree.
-    pub fn node_id(&self) -> NodeId {
-        NodeId::from_ed25519_secret(&self.0)
+    /// This seed's ed25519 public key. Computed from the seed, never stored beside it, so the two
+    /// cannot disagree.
+    pub fn public_key(&self) -> PublicKey {
+        PublicKey::of_seed(&self.0)
     }
 
     /// Lend the raw seed to `lend` for the length of the call. The borrow cannot outlive the closure,
@@ -116,10 +116,10 @@ impl Drop for Secret {
 
 impl ZeroizeOnDrop for Secret {}
 
-/// Names the key, never shows it: the node id is public, the seed is not.
+/// Names the key, never shows it: the public key is public, the seed is not.
 impl fmt::Debug for Secret {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("Secret").field(&self.node_id()).finish()
+        f.debug_tuple("Secret").field(&self.public_key()).finish()
     }
 }
 

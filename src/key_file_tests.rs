@@ -88,7 +88,7 @@ fn a_plain_write_reads_back_as_the_same_key() {
     assert_eq!(bytes(&file), [1; 32]);
     let stored = file.load().unwrap().unwrap();
     assert!(matches!(stored, Stored::Plain(_)));
-    assert_eq!(stored.node_id(), secret.node_id());
+    assert_eq!(stored.public_key(), secret.public_key());
     assert_eq!(dir.names(), ["identity.key"]);
 }
 
@@ -100,10 +100,10 @@ fn a_sealed_write_names_its_node_locked_and_opens_to_the_same_key() {
     assert_eq!(bytes(&file).len(), SEALED_LEN);
     let locked = locked(&file);
     assert_eq!(locked.methods().collect::<Vec<_>>(), [Method::Passphrase]);
-    assert_eq!(locked.node_id(), secret.node_id());
+    assert_eq!(locked.public_key(), secret.public_key());
     assert_eq!(
-        locked.unlock(with(&under)).unwrap().node_id(),
-        secret.node_id()
+        locked.unlock(with(&under)).unwrap().public_key(),
+        secret.public_key()
     );
     assert_eq!(dir.names(), ["identity.key"]);
 }
@@ -310,7 +310,7 @@ fn adopting_over_a_sealed_file_proves_its_claim_by_unlocking_it() {
     file.adopt(&secret, Protection::Passphrase(&under)).unwrap();
     // With no passphrase, the header's claim is all there is, and a claim is not enough.
     match file.adopt(&secret, Protection::Plain) {
-        Err(Error::Unconfirmed { claimed, .. }) => assert_eq!(claimed, secret.node_id()),
+        Err(Error::Unconfirmed { claimed, .. }) => assert_eq!(claimed, secret.public_key()),
         other => panic!("expected the claim to go unconfirmed, got {other:?}"),
     }
     assert_eq!(bytes(&file), before);
@@ -325,9 +325,9 @@ fn a_sealed_file_claiming_the_adopted_key_is_not_taken_at_its_word() {
     // is not it.
     let claimed = Secret::copy_of(&[3; 32]);
     let mut forged = bytes(&file);
-    forged[AT_PUBLIC..HEADER_LEN].copy_from_slice(claimed.node_id().key());
+    forged[AT_PUBLIC..HEADER_LEN].copy_from_slice(claimed.public_key().bytes());
     plant(&file, &forged);
-    assert_eq!(locked(&file).node_id(), claimed.node_id());
+    assert_eq!(locked(&file).public_key(), claimed.public_key());
 
     assert!(matches!(
         file.adopt(&claimed, Protection::Passphrase(&under)),
@@ -351,8 +351,8 @@ fn adopting_over_a_different_key_is_refused_and_leaves_it() {
             incoming: offered,
             ..
         }) => {
-            assert_eq!(existing, held.node_id());
-            assert_eq!(offered, incoming.node_id());
+            assert_eq!(existing, held.public_key());
+            assert_eq!(offered, incoming.public_key());
         }
         other => panic!("expected a refusal naming both keys, got {other:?}"),
     }
@@ -365,7 +365,7 @@ fn adopting_into_absence_writes_the_key() {
     let file = key_file(&dir);
     let secret = Secret::copy_of(&[4; 32]);
     file.adopt(&secret, Protection::Plain).unwrap();
-    assert_eq!(plain(&file).node_id(), secret.node_id());
+    assert_eq!(plain(&file).public_key(), secret.public_key());
 }
 
 #[test]
@@ -388,11 +388,11 @@ fn a_plain_key_takes_a_passphrase_lock_and_gives_it_back_as_the_same_node() {
 
     file.add_lock(None, lock(&under)).unwrap();
     let locked = locked(&file);
-    assert_eq!(locked.node_id(), secret.node_id());
+    assert_eq!(locked.public_key(), secret.public_key());
     assert_eq!(locked.methods().collect::<Vec<_>>(), [Method::Passphrase]);
     assert_eq!(
-        locked.unlock(with(&under)).unwrap().node_id(),
-        secret.node_id()
+        locked.unlock(with(&under)).unwrap().public_key(),
+        secret.public_key()
     );
 
     file.remove_lock(with(&under), Method::Passphrase).unwrap();
@@ -419,7 +419,7 @@ fn a_second_lock_of_one_method_replaces_it() {
         Err(Error::Unlock { .. })
     ));
     let opened = locked.open(with(&new)).unwrap();
-    assert_eq!(opened.secret.node_id(), secret.node_id());
+    assert_eq!(opened.secret.public_key(), secret.public_key());
     // The file key is the file's for life: the new lock wraps the same one.
     assert_eq!(opened.file_key.bytes(), &file_key);
     // The lock's salt and nonce, and the seed's nonce, are drawn afresh: none is reused.
@@ -444,7 +444,7 @@ fn removing_a_device_keys_last_lock_writes_it_plain() {
 
     file.remove_lock(with(&under), Method::Passphrase).unwrap();
     assert_eq!(bytes(&file), [6; 32]);
-    assert_eq!(plain(&file).node_id(), secret.node_id());
+    assert_eq!(plain(&file).public_key(), secret.public_key());
     assert_eq!(dir.names(), ["identity.key"]);
 }
 
@@ -528,18 +528,18 @@ fn an_interrupted_lock_change_leaves_the_original_readable() {
     let image = file.seal(&unlocked, lock(&under)).unwrap();
     let staged = file.stage(&image).unwrap();
     staged
-        .verify(Proof::Lock(with(&under)), secret.node_id())
+        .verify(Proof::Lock(with(&under)), secret.public_key())
         .unwrap();
     core::mem::forget(staged);
 
     assert_eq!(bytes(&file), [6; 32]);
-    assert_eq!(plain(&file).node_id(), secret.node_id());
+    assert_eq!(plain(&file).public_key(), secret.public_key());
     // The orphaned stage is a sibling, and it does not stop the change from being run again.
     assert_eq!(dir.names().len(), 2);
     file.add_lock(None, lock(&under)).unwrap();
     assert_eq!(
-        locked(&file).unlock(with(&under)).unwrap().node_id(),
-        secret.node_id()
+        locked(&file).unlock(with(&under)).unwrap().public_key(),
+        secret.public_key()
     );
     // And the rerun swept the orphan.
     assert_eq!(dir.names(), ["identity.key"]);
@@ -599,7 +599,12 @@ fn a_lock_change_never_writes_over_a_file_replaced_since_it_read_it() {
     fs::rename(&restored, file.path()).unwrap();
 
     assert!(matches!(
-        file.replace(&image, Proof::Lock(with(&under)), secret.node_id(), &seen),
+        file.replace(
+            &image,
+            Proof::Lock(with(&under)),
+            secret.public_key(),
+            &seen
+        ),
         Err(Error::Changed { .. })
     ));
     assert_eq!(bytes(&file), [7; 32]);
@@ -619,7 +624,12 @@ fn a_lock_change_never_writes_over_a_file_changed_in_place_since_it_read_it() {
     fs::write(file.path(), [7; 32]).unwrap();
 
     assert!(matches!(
-        file.replace(&image, Proof::Lock(with(&under)), secret.node_id(), &seen),
+        file.replace(
+            &image,
+            Proof::Lock(with(&under)),
+            secret.public_key(),
+            &seen
+        ),
         Err(Error::Changed { .. })
     ));
     assert_eq!(bytes(&file), [7; 32]);
@@ -637,7 +647,12 @@ fn a_new_form_that_does_not_read_back_never_replaces_the_original() {
     let other_passphrase = passphrase("something else");
     let wrong = Envelope::seal(&secret, Kind::Device, lock(&other_passphrase)).unwrap();
     assert!(matches!(
-        file.replace(&wrong, Proof::Lock(with(&under)), secret.node_id(), &seen),
+        file.replace(
+            &wrong,
+            Proof::Lock(with(&under)),
+            secret.public_key(),
+            &seen
+        ),
         Err(Error::Unverified { .. })
     ));
     // And a form that opens, but to another node.
@@ -647,7 +662,7 @@ fn a_new_form_that_does_not_read_back_never_replaces_the_original() {
         file.replace(
             &elsewhere,
             Proof::Lock(with(&under)),
-            secret.node_id(),
+            secret.public_key(),
             &seen
         ),
         Err(Error::Unverified { .. })
@@ -671,7 +686,7 @@ fn a_lock_change_that_cannot_stage_leaves_the_original_readable() {
 
     fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
     assert!(matches!(outcome, Err(Error::Io { .. })));
-    assert_eq!(plain(&file).node_id(), secret.node_id());
+    assert_eq!(plain(&file).public_key(), secret.public_key());
     assert_eq!(dir.names(), ["identity.key"]);
 }
 
@@ -702,8 +717,8 @@ fn a_lock_change_through_a_link_rewrites_the_file_the_link_names() {
     );
     assert_eq!(bytes(&kept).len(), SEALED_LEN);
     assert_eq!(
-        locked(&file).unlock(with(&under)).unwrap().node_id(),
-        secret.node_id()
+        locked(&file).unlock(with(&under)).unwrap().public_key(),
+        secret.public_key()
     );
     assert_eq!(dir.names(), ["dotfiles", "identity.key"]);
     assert_eq!(fs::read_dir(&kept_dir).unwrap().count(), 1);
@@ -734,7 +749,7 @@ fn a_new_key_that_does_not_read_back_is_never_published() {
     let other_passphrase = passphrase("something else");
     let wrong = Envelope::seal(&secret, Kind::Device, lock(&other_passphrase)).unwrap();
     assert!(matches!(
-        file.create(&wrong, Proof::Lock(with(&under)), secret.node_id()),
+        file.create(&wrong, Proof::Lock(with(&under)), secret.public_key()),
         Err(Error::Unverified { .. })
     ));
     assert!(dir.names().is_empty());
@@ -770,8 +785,8 @@ fn a_root_key_is_written_sealed_as_the_root_kind() {
     assert_eq!(file.kind(), Kind::Root);
     assert_eq!(bytes(&file).len(), SEALED_LEN);
     assert_eq!(
-        locked(&file).unlock(with(&under)).unwrap().node_id(),
-        secret.node_id()
+        locked(&file).unlock(with(&under)).unwrap().public_key(),
+        secret.public_key()
     );
     assert_eq!(
         wrong_kind(as_device(&file).load()),
@@ -814,7 +829,7 @@ fn a_plain_file_in_the_root_slot_loads_as_plain() {
     let dir = TestDir::new();
     let (device, secret) = plain_file(&dir, [4; 32]);
     let root = KeyFile::root(device.path());
-    assert_eq!(plain(&root).node_id(), secret.node_id());
+    assert_eq!(plain(&root).public_key(), secret.public_key());
 }
 
 #[test]
@@ -870,8 +885,8 @@ fn a_root_key_stays_a_root_key_through_every_lock_change() {
     // And a new passphrase keeps it one.
     file.add_lock(Some(with(&under)), lock(&new)).unwrap();
     assert_eq!(
-        locked(&file).unlock(with(&new)).unwrap().node_id(),
-        secret.node_id()
+        locked(&file).unlock(with(&new)).unwrap().public_key(),
+        secret.public_key()
     );
     assert_eq!(wrong_kind(device.load()), (Kind::Device, Kind::Root));
 }

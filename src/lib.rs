@@ -31,6 +31,7 @@ mod kind;
 mod lock;
 mod method;
 mod passphrase;
+mod public_key;
 mod secret;
 mod stored;
 #[cfg(unix)]
@@ -41,6 +42,7 @@ pub use key_file::KeyFile;
 pub use kind::Kind;
 pub use method::{Method, NewLock, Protection, Unlock};
 pub use passphrase::{Passphrase, PassphraseError};
+pub use public_key::PublicKey;
 pub use secret::Secret;
 pub use stored::{Locked, Stored};
 
