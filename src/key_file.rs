@@ -18,7 +18,7 @@ use crate::stored::{Locked, Stored};
 /// huge file or a device at the path is refused on its size without being read.
 const READ_CAP: u64 = 4096;
 
-/// A key file at a path: the one place a node's key is loaded from, written to, or rewritten.
+/// A key file at a path: the one place a key is loaded from, written to, or rewritten.
 ///
 /// Every write lands whole or not at all. The new bytes are staged in a sibling file created
 /// owner-only, synced, read back and unlocked through the same loader every load uses, and only then
@@ -397,7 +397,7 @@ impl KeyFile {
     /// process's effective user) nor root. Read from the open handle; unix only, because no other
     /// platform has an owner and mode to read, and a check that pretended would be false assurance.
     ///
-    /// The owner matters as much as the mode: a node running as root would otherwise load an
+    /// The owner matters as much as the mode: a process running as root would otherwise load an
     /// owner-only key that any user able to place a file at the path had put there. Root is allowed
     /// as an owner because a key installed by an administrator for a service is root's to give.
     fn guard_access(&self, metadata: &fs::Metadata, euid: u32) -> Result<(), Error> {
