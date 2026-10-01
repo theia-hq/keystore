@@ -1,8 +1,8 @@
 //! The effective user id, for the key file's owner check.
 //!
 //! The one `unsafe` in this crate, allowed back on this one function and nowhere else. The standard library has no
-//! call for the effective uid, and the owner check means nothing without it: a node running as root
-//! must refuse a key file some other user placed at its path.
+//! call for the effective uid, and the owner check means nothing without it: a process running as
+//! root must refuse a key file some other user placed at its path.
 
 /// This process's effective user id.
 #[allow(unsafe_code)]

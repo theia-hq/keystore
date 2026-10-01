@@ -52,7 +52,7 @@ pub(crate) const SIGNATURE: [u8; 8] = *b"KEYSTORE";
 /// The one format version this build reads and writes.
 const VERSION: u8 = 2;
 /// File kind: a device's own ed25519 key file. A backup of one is this same kind, byte for byte a sealed
-/// key file for the same node, so restoring it is installing a copy that was already verified. An
+/// key file holding the same seed, so restoring it is installing a copy that was already verified. An
 /// artifact that is NOT a device key file takes a new kind, so it can never be mistaken for one.
 const KIND_DEVICE_KEY: u8 = 1;
 /// File kind: a root key, the key other keys are vouched for by. The same layout as a device key, told

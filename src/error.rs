@@ -27,7 +27,7 @@ pub enum Error {
         /// The key file.
         path: PathBuf,
     },
-    /// Group or other holds a permission bit on the file. The seed IS the node, so loading a file
+    /// Group or other holds a permission bit on the file. The seed IS the key, so loading a file
     /// others can reach would bless the leak.
     #[error(
         "the key file {} gives group or other access (mode {:04o}); run `chmod 600 {}`",
@@ -41,8 +41,8 @@ pub enum Error {
         /// The mode that failed the owner-only check.
         mode: u32,
     },
-    /// The file is owned by a user who is neither this process's user nor root. A node running as
-    /// root would otherwise load a key any user could put at the path.
+    /// The file is owned by a user who is neither this process's user nor root. A process running
+    /// as root would otherwise load a key any user could put at the path.
     #[error(
         "the key file {} is owned by uid {owner}, not by this user or root",
         path.display()
@@ -71,7 +71,7 @@ pub enum Error {
         path: PathBuf,
     },
     /// A sealed file unlocked, but its header names a different public key than the seed it seals.
-    #[error("the key file {} names one node in its header and seals the key of another", path.display())]
+    #[error("the key file {} seals a different key than its header names", path.display())]
     Inconsistent {
         /// The key file.
         path: PathBuf,

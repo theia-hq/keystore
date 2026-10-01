@@ -93,7 +93,7 @@ fn a_plain_write_reads_back_as_the_same_key() {
 }
 
 #[test]
-fn a_sealed_write_names_its_node_locked_and_opens_to_the_same_key() {
+fn a_sealed_write_names_its_key_locked_and_opens_to_the_same_key() {
     let dir = TestDir::new();
     let under = passphrase("correct horse battery staple");
     let (file, secret) = sealed_file(&dir, [2; 32], &under);
@@ -321,7 +321,7 @@ fn a_sealed_file_claiming_the_adopted_key_is_not_taken_at_its_word() {
     let dir = TestDir::new();
     let under = passphrase("correct horse battery staple");
     let (file, _) = sealed_file(&dir, [2; 32], &under);
-    // Rewrite the header to claim another node: the file loads as that node, and seals a key that
+    // Rewrite the header to claim another key: the file loads as that key, and seals a key that
     // is not it.
     let claimed = Secret::copy_of(&[3; 32]);
     let mut forged = bytes(&file);
@@ -381,7 +381,7 @@ fn adopting_over_an_unreadable_file_refuses_rather_than_replacing_it() {
 }
 
 #[test]
-fn a_plain_key_takes_a_passphrase_lock_and_gives_it_back_as_the_same_node() {
+fn a_plain_key_takes_a_passphrase_lock_and_gives_it_back_as_the_same_key() {
     let dir = TestDir::new();
     let under = passphrase("correct horse battery staple");
     let (file, secret) = plain_file(&dir, [6; 32]);
@@ -655,7 +655,7 @@ fn a_new_form_that_does_not_read_back_never_replaces_the_original() {
         ),
         Err(Error::Unverified { .. })
     ));
-    // And a form that opens, but to another node.
+    // And a form that opens, but to another key.
     let other = Secret::copy_of(&[8; 32]);
     let elsewhere = Envelope::seal(&other, Kind::Device, lock(&under)).unwrap();
     assert!(matches!(

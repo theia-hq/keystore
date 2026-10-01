@@ -8,15 +8,14 @@ use crate::public_key::PublicKey;
 /// The length of an ed25519 seed, which is also the length of a plain key file.
 pub(crate) const SEED_LEN: usize = PublicKey::LEN;
 
-/// An ed25519 seed: the one secret a node holds.
+/// An ed25519 seed: the one secret a key file holds.
 ///
 /// The bytes live behind a heap pointer and are wiped when the `Secret` drops, so moving a `Secret`
 /// moves a pointer and leaves no copy of the seed behind in the frame it left. There is deliberately
 /// no way to take the seed out by value: no `into_bytes`, no `to_bytes`, no `Clone`, no `Deref`, no
 /// `AsRef`. A consumer that needs the raw bytes borrows them for the length of a closure
 /// ([`with_bytes`](Self::with_bytes)). One that must hold them across an `.await` holds the `Secret`
-/// instead, and passes the borrow to something that takes what it needs before its future starts
-/// (the transport binds do).
+/// instead, and passes the borrow to something that takes what it needs before its future starts.
 ///
 /// Each refusal below names the error it must fail with, so it fails for the reason it states and
 /// not for a typo. Only a nightly `rustdoc` checks the codes; a stable one checks only that the

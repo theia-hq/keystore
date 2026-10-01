@@ -1,4 +1,4 @@
-//! Storage for a node's secret key: one [`Secret`], one versioned file format, and the codecs that
+//! Storage for one secret key: one [`Secret`], one versioned file format, and the codecs that
 //! load, write, adopt, and lock a key file.
 //!
 //! A key file holds one ed25519 seed of one [`Kind`]. The kind says what the key is for, a device's
@@ -21,7 +21,7 @@
 //! ([`Secret::with_bytes`]), and every buffer that holds it here is wiped on drop. What this cannot
 //! stop is a copy the caller makes on purpose: a seed is a `Copy` array, so
 //! `secret.with_bytes(|seed| *seed)` compiles to a bare `[u8; 32]` that nothing wipes. Hand the borrow
-//! on instead: the transport binds take `&[u8; 32]`, so `secret.with_bytes(bind)` makes no copy.
+//! on instead: `secret.with_bytes(f)`, where `f` takes `&[u8; 32]`, makes no copy.
 
 mod cipher;
 mod envelope;
