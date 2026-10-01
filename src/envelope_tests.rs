@@ -3,8 +3,8 @@ use zeroize::Zeroizing;
 use super::{Envelope, HEADER_LEN, Opened, Parsed, Refusal, SIGNATURE, assemble, header, parse};
 use crate::error::FormatError;
 use crate::kind::Kind;
-use crate::lock::passphrase::{BODY_LEN, Cost, PassphraseLock};
-use crate::lock::{FileKey, Lock};
+use crate::lock::passphrase::{Cost, PassphraseParams};
+use crate::lock::{FileKey, Lock, Params};
 use crate::method::{Method, NewLock, Unlock};
 use crate::passphrase::Passphrase;
 use crate::public_key::PublicKey;
@@ -183,15 +183,26 @@ fn build(
 ) -> Vec<u8> {
     let file_key = FileKey::copy_of(&golden_file_key());
     let header = header(kind, public);
-    let lock =
-        PassphraseLock::wrap_with(under, &file_key, &header, cost, salt, golden_lock_nonce())
-            .unwrap();
-    assemble(
-        &header,
-        &[&Lock::Passphrase(lock)],
-        &file_key,
-        secret,
-        &golden_seed_nonce(),
+    let lock = passphrase_lock(under, &file_key, &header, cost, salt);
+    assemble(&header, &[&lock], &file_key, secret, &golden_seed_nonce()).unwrap()
+}
+
+/// A passphrase lock built by this crate's writer from chosen inputs, wrapping `file_key` for a
+/// file whose first bytes are `header`, under the golden lock nonce.
+fn passphrase_lock(
+    under: &Passphrase,
+    file_key: &FileKey,
+    header: &[u8; HEADER_LEN],
+    cost: Cost,
+    salt: [u8; 16],
+) -> Lock {
+    let (params, kek) = PassphraseParams::enroll_with(under, cost, salt).unwrap();
+    Lock::wrap_with(
+        Params::Passphrase(params),
+        &kek,
+        file_key,
+        header,
+        golden_lock_nonce(),
     )
     .unwrap()
 }
@@ -269,16 +280,15 @@ fn this_build_writes_the_golden_root_vector_byte_for_byte() {
 fn a_decomposed_typing_of_the_passphrase_opens_the_nfc_golden_lock() {
     // The golden lock, wrapped instead under the NFC form of `café crème`. The passphrase's byte form
     // matters only to the lock it opens, so the lock alone is pinned.
-    let mut body = [0; BODY_LEN];
-    body.copy_from_slice(&GOLDEN[AT_KDF..AT_SEED_NONCE]);
+    let mut body = GOLDEN[AT_KDF..AT_SEED_NONCE].to_vec();
     body[AT_WRAPPED - AT_KDF..].copy_from_slice(&GOLDEN_NFC_WRAPPED);
-    let lock = PassphraseLock::parse(&body).unwrap();
+    let lock = Lock::parse(Method::Passphrase, &body).unwrap();
     let mut golden_header = [0; HEADER_LEN];
     golden_header.copy_from_slice(&GOLDEN[..HEADER_LEN]);
     // `e` then a combining accent: the spelling a dead-key terminal may send, not the one sealed.
     let typed =
         Passphrase::try_from(Zeroizing::new("cafe\u{301} cre\u{300}me".to_owned())).unwrap();
-    let Ok(file_key) = lock.open(&typed, &golden_header) else {
+    let Ok(file_key) = lock.open(Unlock::Passphrase(&typed), &golden_header) else {
         panic!("the decomposed typing did not open the NFC lock");
     };
     assert_eq!(file_key.bytes(), &golden_file_key());
@@ -431,22 +441,16 @@ fn any_edit_to_a_lock_fails_the_whole_file() {
     let mut golden_header = [0; HEADER_LEN];
     golden_header.copy_from_slice(&image[..HEADER_LEN]);
     let other_salt = core::array::from_fn(|at| 0x10 + at as u8);
-    let swapped_lock = PassphraseLock::wrap_with(
-        &under,
-        &file_key,
-        &golden_header,
-        Cost::FLOOR,
-        other_salt,
-        golden_lock_nonce(),
-    )
-    .unwrap();
+    let swapped_lock = passphrase_lock(&under, &file_key, &golden_header, Cost::FLOOR, other_salt);
+    let mut record = Vec::new();
+    swapped_lock.write(&mut record);
     let mut swapped = image.clone();
-    swapped[AT_KDF..AT_SEED_NONCE].copy_from_slice(&swapped_lock.body());
+    swapped[AT_METHOD..AT_SEED_NONCE].copy_from_slice(&record);
     let envelope = sealed(&swapped);
-    let Some(Lock::Passphrase(lock)) = envelope.locks.first() else {
+    let Some(lock) = envelope.locks.first() else {
         panic!("the swapped file lost its lock");
     };
-    let Ok(opened_key) = lock.open(&under, &golden_header) else {
+    let Ok(opened_key) = lock.open(Unlock::Passphrase(&under), &golden_header) else {
         panic!("the swapped-in lock does not open on its own");
     };
     assert_eq!(opened_key.bytes(), &golden_file_key());

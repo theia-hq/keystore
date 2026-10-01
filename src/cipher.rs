@@ -37,6 +37,13 @@ pub(crate) fn seal(
     Ok(sealed)
 }
 
+/// A fresh nonce from the operating system's random source, for one seal.
+pub(crate) fn fresh_nonce() -> Result<[u8; NONCE_LEN], CryptoError> {
+    let mut nonce = [0; NONCE_LEN];
+    getrandom::fill(&mut nonce).map_err(CryptoError::entropy)?;
+    Ok(nonce)
+}
+
 /// Why a seal did not open.
 pub(crate) enum Failed {
     /// The tag did not verify: the wrong key, or damaged bytes. The cipher cannot tell them apart.

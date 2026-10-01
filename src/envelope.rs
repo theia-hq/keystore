@@ -219,7 +219,13 @@ impl Envelope {
         let file_key = FileKey::generate()?;
         let header = header(kind, secret.public_key());
         let lock = Lock::wrap(lock, &file_key, &header)?;
-        assemble(&header, &[&lock], &file_key, secret, &fresh_nonce()?)
+        assemble(
+            &header,
+            &[&lock],
+            &file_key,
+            secret,
+            &cipher::fresh_nonce()?,
+        )
     }
 
     /// Open the file with `with`: its lock unwraps the file key, and the file key opens the seed. The
@@ -275,7 +281,7 @@ impl Envelope {
             &locks,
             &opened.file_key,
             &opened.secret,
-            &fresh_nonce()?,
+            &cipher::fresh_nonce()?,
         )
     }
 
@@ -299,7 +305,7 @@ impl Envelope {
             &locks,
             &opened.file_key,
             &opened.secret,
-            &fresh_nonce()?,
+            &cipher::fresh_nonce()?,
         )
         .map(Some)
     }
@@ -366,12 +372,6 @@ pub(crate) fn assemble(
     image.extend_from_slice(seed_nonce);
     image.extend_from_slice(&sealed);
     Ok(image)
-}
-
-fn fresh_nonce() -> Result<[u8; NONCE_LEN], CryptoError> {
-    let mut nonce = [0; NONCE_LEN];
-    getrandom::fill(&mut nonce).map_err(CryptoError::entropy)?;
-    Ok(nonce)
 }
 
 fn sealed_size(bytes: &[u8]) -> FormatError {

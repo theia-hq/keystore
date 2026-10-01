@@ -302,3 +302,28 @@ fn the_seed_and_passphrase_owners_are_built_to_wipe() {
     );
     assert!(read("passphrase.rs").contains("pub struct Passphrase(Zeroizing<Vec<u8>>);"));
 }
+
+/// A method makes a key-encryption key and nothing else: the file key, the seed, and the cipher that
+/// wraps one under the other belong to the core in `lock.rs`. Every method module lives under
+/// `lock/`, and none may name them, so no method's code can take, return, or hold the file key.
+#[test]
+fn no_method_sees_the_file_key() {
+    const CORE_ONLY: &[&str] = &["FileKey", "Secret", "cipher", "seal", "open"];
+    let methods: Vec<(String, String)> = shipped_sources()
+        .into_iter()
+        .filter(|(name, _)| name.starts_with("lock/"))
+        .collect();
+    assert!(
+        methods.iter().any(|(name, _)| name == "lock/passphrase.rs"),
+        "the scan did not reach the passphrase method"
+    );
+    for (name, source) in methods {
+        let code = code_only(&source);
+        for token in code.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
+            assert!(
+                !CORE_ONLY.contains(&token),
+                "{name} names `{token}`, which only the core may hold"
+            );
+        }
+    }
+}

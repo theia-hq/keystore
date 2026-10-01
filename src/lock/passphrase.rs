@@ -1,7 +1,7 @@
-//! The passphrase lock: Argon2id derives a key from the passphrase, and XChaCha20-Poly1305 wraps the
-//! file key under it.
+//! The passphrase lock: Argon2id derives the key-encryption key from the passphrase. The lock's
+//! nonce and wrapped file key follow these parameters, and are the core's (see `lock`).
 //!
-//! Its body is 101 bytes, every field fixed-width, integers big-endian:
+//! Its parameters are 29 bytes, every field fixed-width, integers big-endian:
 //!
 //! | offset | len | field                                                   |
 //! | ------ | --- | ------------------------------------------------------- |
@@ -10,154 +10,102 @@
 //! | 5      | 4   | Argon2id passes                                         |
 //! | 9      | 4   | Argon2id lanes                                          |
 //! | 13     | 16  | salt                                                    |
-//! | 29     | 24  | XChaCha20-Poly1305 nonce                                |
-//! | 53     | 48  | the file key, encrypted, then its Poly1305 tag          |
 //!
-//! Bytes 0..53 are the wrap's associated data after the file's first bytes and the method byte, so
-//! an edit to any of them, the Argon2id cost included, fails the unlock rather than producing a key.
-//! The derivation byte is where the lock grows: an unknown value is refused by name, never guessed at.
+//! The wrap authenticates them, so an edit to any of them, the Argon2id cost included, fails the
+//! unlock rather than producing a key. The derivation byte is where the lock grows: an unknown value
+//! is refused by name, never guessed at.
 
 use argon2::{Algorithm, Argon2, Block, Params, Version};
 use zeroize::Zeroizing;
 
-use crate::cipher::{self, Failed, KEY_LEN, NONCE_LEN, SEALED_LEN};
-use crate::envelope::{HEADER_LEN, Refusal};
 use crate::error::{CryptoError, FormatError};
-use crate::lock::{FileKey, wrap_aad};
-use crate::method::Method;
+use crate::lock::Kek;
 use crate::passphrase::Passphrase;
 
 /// Key derivation: Argon2id at version `0x13`.
 const KDF_ARGON2ID: u8 = 1;
 const SALT_LEN: usize = 16;
 
-// The body's offsets, in order. Every field is fixed-width, so these ARE the grammar.
+// The parameters' offsets, in order. Every field is fixed-width, so these ARE the grammar.
 const AT_KDF: usize = 0;
 const AT_MEMORY: usize = AT_KDF + 1;
 const AT_PASSES: usize = AT_MEMORY + 4;
 const AT_LANES: usize = AT_PASSES + 4;
 const AT_SALT: usize = AT_LANES + 4;
-const AT_NONCE: usize = AT_SALT + SALT_LEN;
-/// Everything before the wrapped file key: the part of the body the wrap authenticates.
-const AT_WRAPPED: usize = AT_NONCE + NONCE_LEN;
-/// The length of a passphrase lock's body.
-pub(crate) const BODY_LEN: usize = AT_WRAPPED + SEALED_LEN;
+/// The length of a passphrase lock's parameters.
+pub(crate) const PARAMS_LEN: usize = AT_SALT + SALT_LEN;
 
 // The layout is frozen: a file written today must parse forever. Moving a field is a compile error
 // here before it is a golden-vector failure in the tests.
-const _: () = assert!(AT_WRAPPED == 53 && BODY_LEN == 101);
+const _: () = assert!(PARAMS_LEN == 29);
 
-/// A passphrase lock, parsed: the derivation within bounds, and the wrapped file key.
-pub(crate) struct PassphraseLock {
+/// A passphrase lock's parameters, parsed: the derivation within bounds, and its salt.
+pub(crate) struct PassphraseParams {
     cost: Cost,
     salt: [u8; SALT_LEN],
-    nonce: [u8; NONCE_LEN],
-    wrapped: [u8; SEALED_LEN],
 }
 
-impl PassphraseLock {
-    pub(crate) fn parse(body: &[u8; BODY_LEN]) -> Result<Self, FormatError> {
-        match body[AT_KDF] {
+impl PassphraseParams {
+    pub(crate) fn parse(bytes: &[u8; PARAMS_LEN]) -> Result<Self, FormatError> {
+        match bytes[AT_KDF] {
             KDF_ARGON2ID => {}
             found => return Err(FormatError::Kdf { found }),
         }
         let cost = Cost::parse(
-            u32::from_be_bytes(field(body, AT_MEMORY)),
-            u32::from_be_bytes(field(body, AT_PASSES)),
-            u32::from_be_bytes(field(body, AT_LANES)),
+            u32::from_be_bytes(field(bytes, AT_MEMORY)),
+            u32::from_be_bytes(field(bytes, AT_PASSES)),
+            u32::from_be_bytes(field(bytes, AT_LANES)),
         )?;
         Ok(Self {
             cost,
-            salt: field(body, AT_SALT),
-            nonce: field(body, AT_NONCE),
-            wrapped: field(body, AT_WRAPPED),
+            salt: field(bytes, AT_SALT),
         })
     }
 
-    /// Wrap `file_key` under `passphrase` at the default cost, with a fresh salt and nonce drawn for
-    /// this lock alone: locking the same file under the same passphrase twice never reuses either.
-    pub(crate) fn wrap(
-        passphrase: &Passphrase,
-        file_key: &FileKey,
-        header: &[u8; HEADER_LEN],
-    ) -> Result<Self, CryptoError> {
+    /// Parameters for a new lock under `passphrase`, at the default cost with a fresh salt drawn
+    /// for this lock alone, and the key they make: locking the same file under the same passphrase
+    /// twice never reuses a salt.
+    pub(crate) fn enroll(passphrase: &Passphrase) -> Result<(Self, Kek), CryptoError> {
         let mut salt = [0; SALT_LEN];
-        let mut nonce = [0; NONCE_LEN];
         getrandom::fill(&mut salt).map_err(CryptoError::entropy)?;
-        getrandom::fill(&mut nonce).map_err(CryptoError::entropy)?;
-        Self::wrap_with(passphrase, file_key, header, Cost::DEFAULT, salt, nonce)
+        Self::enroll_with(passphrase, Cost::DEFAULT, salt)
     }
 
-    /// Wrap with every input chosen by the caller. Only [`wrap`](Self::wrap) reaches this outside
-    /// the tests; the tests use it to pin the exact bytes this build writes against the golden
-    /// vector.
-    pub(crate) fn wrap_with(
+    /// Enroll with every input chosen by the caller. Only [`enroll`](Self::enroll) reaches this
+    /// outside the tests; the tests use it to pin the exact bytes this build writes against the
+    /// golden vector.
+    pub(crate) fn enroll_with(
         passphrase: &Passphrase,
-        file_key: &FileKey,
-        header: &[u8; HEADER_LEN],
         cost: Cost,
         salt: [u8; SALT_LEN],
-        nonce: [u8; NONCE_LEN],
-    ) -> Result<Self, CryptoError> {
-        let mut lock = Self {
-            cost,
-            salt,
-            nonce,
-            wrapped: [0; SEALED_LEN],
-        };
-        let key = cost.derive(passphrase, &salt)?;
-        lock.wrapped = cipher::seal(&key, &nonce, &lock.aad(header), file_key.bytes())?;
-        Ok(lock)
+    ) -> Result<(Self, Kek), CryptoError> {
+        let params = Self { cost, salt };
+        let kek = params.kek(passphrase)?;
+        Ok((params, kek))
     }
 
-    /// Unwrap the file key with `passphrase`. A wrong passphrase and a damaged lock are the same
-    /// refusal, because the cipher cannot tell them apart and a refusal that tried would be a guess an
-    /// attacker could probe.
-    pub(crate) fn open(
-        &self,
-        passphrase: &Passphrase,
-        header: &[u8; HEADER_LEN],
-    ) -> Result<FileKey, Refusal> {
-        let key = self
-            .cost
-            .derive(passphrase, &self.salt)
-            .map_err(Refusal::Crypto)?;
-        match cipher::open(&key, &self.nonce, &self.aad(header), &self.wrapped) {
-            Ok(file_key) => Ok(FileKey::copy_of(&file_key)),
-            Err(Failed::Tag) => Err(Refusal::Unlock),
-            Err(Failed::Crypto(source)) => Err(Refusal::Crypto(source)),
-        }
+    /// The key `passphrase` makes under these parameters.
+    pub(crate) fn kek(&self, passphrase: &Passphrase) -> Result<Kek, CryptoError> {
+        self.cost.derive(passphrase, &self.salt).map(Kek)
     }
 
-    /// The body, byte for byte as it sits in the file.
-    pub(crate) fn body(&self) -> [u8; BODY_LEN] {
-        let mut body = [0; BODY_LEN];
-        body[..AT_WRAPPED].copy_from_slice(&self.head());
-        body[AT_WRAPPED..].copy_from_slice(&self.wrapped);
-        body
-    }
-
-    /// The body up to the wrapped file key.
-    fn head(&self) -> [u8; AT_WRAPPED] {
-        let mut head = [0; AT_WRAPPED];
-        head[AT_KDF] = KDF_ARGON2ID;
-        head[AT_MEMORY..AT_PASSES].copy_from_slice(&self.cost.memory_kib.to_be_bytes());
-        head[AT_PASSES..AT_LANES].copy_from_slice(&self.cost.passes.to_be_bytes());
-        head[AT_LANES..AT_SALT].copy_from_slice(&self.cost.lanes.to_be_bytes());
-        head[AT_SALT..AT_NONCE].copy_from_slice(&self.salt);
-        head[AT_NONCE..].copy_from_slice(&self.nonce);
-        head
-    }
-
-    fn aad(&self, header: &[u8; HEADER_LEN]) -> Vec<u8> {
-        wrap_aad(header, Method::Passphrase, &self.head())
+    /// The parameters, byte for byte as they sit in the file.
+    pub(crate) fn bytes(&self) -> [u8; PARAMS_LEN] {
+        let mut bytes = [0; PARAMS_LEN];
+        bytes[AT_KDF] = KDF_ARGON2ID;
+        bytes[AT_MEMORY..AT_PASSES].copy_from_slice(&self.cost.memory_kib.to_be_bytes());
+        bytes[AT_PASSES..AT_LANES].copy_from_slice(&self.cost.passes.to_be_bytes());
+        bytes[AT_LANES..AT_SALT].copy_from_slice(&self.cost.lanes.to_be_bytes());
+        bytes[AT_SALT..].copy_from_slice(&self.salt);
+        bytes
     }
 }
 
-/// A fixed-width field of the body. The offsets are constants inside [`BODY_LEN`], asserted above.
-fn field<const N: usize>(body: &[u8; BODY_LEN], at: usize) -> [u8; N] {
+/// A fixed-width field of the parameters. The offsets are constants inside [`PARAMS_LEN`], asserted
+/// above.
+fn field<const N: usize>(bytes: &[u8; PARAMS_LEN], at: usize) -> [u8; N] {
     let mut out = [0; N];
-    out.copy_from_slice(&body[at..at + N]);
+    out.copy_from_slice(&bytes[at..at + N]);
     out
 }
 
@@ -228,8 +176,8 @@ impl Cost {
         self,
         passphrase: &Passphrase,
         salt: &[u8],
-    ) -> Result<Zeroizing<[u8; KEY_LEN]>, CryptoError> {
-        let params = Params::new(self.memory_kib, self.passes, self.lanes, Some(KEY_LEN))
+    ) -> Result<Zeroizing<[u8; Kek::LEN]>, CryptoError> {
+        let params = Params::new(self.memory_kib, self.passes, self.lanes, Some(Kek::LEN))
             .map_err(CryptoError::kdf)?;
         // The work memory is ours, not argon2's, so it is wiped when it drops: argon2 frees its own
         // unwiped, and the last pass's blocks are enough to rebuild the key without the passphrase.
@@ -241,7 +189,7 @@ impl Cost {
             .try_reserve_exact(count)
             .map_err(CryptoError::memory)?;
         blocks.resize(count, Block::default());
-        let mut key = Zeroizing::new([0; KEY_LEN]);
+        let mut key = Zeroizing::new([0; Kek::LEN]);
         Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
             .hash_password_into_with_memory(
                 passphrase.as_bytes(),
