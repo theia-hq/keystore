@@ -1,8 +1,8 @@
 [package]
 publish = false  # git-only for now, not published to crates.io
 name = "keystore"
-description = "Storage for a node's secret key: one key file, plain or sealed under a passphrase."
-version = "0.0.0"
+description = "One ed25519 secret key in one file, plain or sealed under a passphrase."
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.91"
 license = "MIT OR Apache-2.0"
