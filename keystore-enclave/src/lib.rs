@@ -16,7 +16,8 @@
 //! again is [`Key::agree`] with the one-time public key.
 //!
 //! The access control is pinned ([`Policy`]): a touch of a finger enrolled when the key was made, at
-//! an unlocked screen, on this Mac. Adding or removing a finger ends the key. The login password
+//! an unlocked screen, on this Mac. Once a finger is added or removed, the key stops opening, until
+//! the fingers enrolled are the ones it was made under again. The login password
 //! never stands in for the touch. Each operation asks through a context of its own, made for it and
 //! invalidated after, so one touch is spent on one operation.
 //!
@@ -67,6 +68,7 @@ pub const SECRET_LEN: usize = 32;
 pub enum Policy {
     /// Each use needs a touch of a finger enrolled when the key was made, at an unlocked screen,
     /// on this Mac (`privateKeyUsage | biometryCurrentSet`, `WhenUnlockedThisDeviceOnly`). Adding or
-    /// removing a finger ends the key; the login password never stands in.
+    /// removing a finger stops the key opening until the fingers change back; the login password never
+    /// stands in.
     BiometryCurrentSet,
 }

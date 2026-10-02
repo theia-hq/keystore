@@ -1035,14 +1035,14 @@ fn removing_the_passphrase_beside_another_macs_lock_is_refused() {
 }
 
 #[test]
-fn removing_a_lock_ended_by_new_fingers_through_the_passphrase_goes_through() {
+fn removing_a_lock_new_fingers_stopped_through_the_passphrase_goes_through() {
     let dir = TestDir::new();
     let under = passphrase("correct horse battery staple");
     let (file, _) = sealed_file(&dir, [6; 32], &under);
     file.add_lock(Some(with(&under)), touch_lock()).unwrap();
 
     // The lock that stays is the one that opened the file, so it still opens here.
-    stand_in::touch(Touch::Ended);
+    stand_in::touch(Touch::FingersChanged);
     file.remove_lock(with(&under), Method::TouchId).unwrap();
     assert_eq!(
         locked(&file).methods().collect::<Vec<_>>(),
@@ -1135,7 +1135,7 @@ fn a_dead_touch_id_lock_is_told_without_a_touch() {
     stand_in::on_mac(2);
     assert_eq!(locked.health(Method::TouchId), Some(Health::Dead));
     stand_in::on_mac(1);
-    stand_in::touch(Touch::Ended);
+    stand_in::touch(Touch::FingersChanged);
     assert_eq!(locked.health(Method::TouchId), Some(Health::Dead));
     // A passphrase lock is live wherever the passphrase is typed.
     assert_eq!(locked.health(Method::Passphrase), Some(Health::Live));

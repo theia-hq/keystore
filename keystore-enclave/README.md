@@ -19,7 +19,8 @@ key.check()?; // this Mac's key, still guarded; no dialog
 let secret = key.agree(&peer, "open your key")?; // asks for a touch
 ```
 
-Adding or removing a finger ends the key; keep another way in to whatever it guards.
+Adding or removing a finger stops the key opening until the fingers change back; keep another way in
+to whatever it guards.
 
 ## License
 

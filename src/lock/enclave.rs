@@ -199,31 +199,107 @@ const _: () = assert!(BLOB_MAX <= u16::MAX as usize);
 /// Where enclave keys are made and loaded: this Mac's Secure Enclave, or the software stand-in that
 /// runs the lock's every byte in the tests. Crate-private, so nothing outside the crate adds a method
 /// through it.
+///
+/// Each answers a refusal by its shape (whose refusal, and its code), never by a verdict, so how a
+/// refusal reads (a cancel, a lock that does not open here, one that cannot be checked now) is decided
+/// in one place here, and tested on the stand-in.
 #[cfg(any(test, target_os = "macos"))]
 pub(crate) trait Enclave {
     type Key: Agree;
 
     /// A new key under `policy`: its blob and its public key. Asks nothing of anyone.
-    fn create(&self, policy: Policy) -> Result<(Blob, Point), TouchIdError>;
+    fn create(&self, policy: Policy) -> Result<(Blob, Point), Refused>;
 
     /// The key `blob` holds, refused unless its public key is `public`. Asks nothing of anyone.
-    fn load(&self, blob: &Blob, public: &Point) -> Result<Self::Key, TouchIdError>;
+    fn load(&self, blob: &Blob, public: &Point) -> Result<Self::Key, Refused>;
 }
 
 /// An enclave key, loaded.
 #[cfg(any(test, target_os = "macos"))]
 pub(crate) trait Agree {
     /// ECDH with `peer`: the shared point's x-coordinate. Asks for a touch, with `reason` shown.
-    fn agree(
-        &self,
-        peer: &Point,
-        reason: &str,
-    ) -> Result<Zeroizing<[u8; SECRET_LEN]>, TouchIdError>;
+    fn agree(&self, peer: &Point, reason: &str) -> Result<Zeroizing<[u8; SECRET_LEN]>, Refused>;
 
-    /// Whether the key would open here given a touch, asked without showing anything: [`Health::Live`]
-    /// when the enclave refuses only for want of a person, [`Health::Dead`] only when the enclave
-    /// refuses the key itself, and [`Health::Unchecked`] for any other answer.
-    fn health(&self) -> Health;
+    /// Ask for the agreement with no dialog allowed: `Ok` when the enclave refuses only for want of a
+    /// person (LocalAuthentication's `-1004`), and its refusal otherwise.
+    fn check(&self) -> Result<(), Refused>;
+}
+
+/// LocalAuthentication's codes for a dialog the person, or the system, closed: the touch did not
+/// match, the person cancelled, the system cancelled (the screen locked with the dialog up), or the
+/// program did.
+#[cfg(any(test, target_os = "macos"))]
+const DECLINED: [isize; 4] = [-1, -2, -4, -9];
+
+/// How an enclave refused: by whom, and with what code. Read here, and nowhere else, into what the
+/// refusal means.
+#[cfg(any(test, target_os = "macos"))]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Shape {
+    /// The blob does not reload here, or reloads as another key than the lock names.
+    NotLoaded,
+    /// CryptoTokenKit, the enclave's token, refused the key itself, with this code: a damaged blob,
+    /// another Mac's, or a key made under other enrolled fingers than the ones enrolled now.
+    Token(isize),
+    /// LocalAuthentication refused, with this code.
+    LocalAuthentication(isize),
+    /// Security's status domain refused, with this code.
+    Status(isize),
+    /// Any other refusal: one the enclave gave no code for, or this side's own.
+    Other,
+}
+
+#[cfg(any(test, target_os = "macos"))]
+impl Shape {
+    /// What a silent check's refusal of this shape says of the lock. Only the key's own refusal reads
+    /// as not opening here; a locked screen (`-4`), a lockout (`-8`), a busy enclave (`-25308`), and
+    /// any code not named here read as not checkable now, never as dead.
+    const fn health(self) -> Health {
+        match self {
+            Self::NotLoaded | Self::Token(_) => Health::Dead,
+            Self::LocalAuthentication(_) | Self::Status(_) | Self::Other => Health::Unchecked,
+        }
+    }
+}
+
+/// An enclave's refusal: its shape, and the enclave's own error, which rides as the cause.
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) struct Refused {
+    pub(crate) shape: Shape,
+    pub(crate) source: crate::error::EnclaveError,
+}
+
+#[cfg(any(test, target_os = "macos"))]
+impl Refused {
+    /// The refusal as a caller tells it: a key that does not open here, a person who said no, or the
+    /// enclave failing. A touch the enclave turns down after the dialog (its token's refusal) is the
+    /// first, never a cancel.
+    fn into_error(self) -> TouchIdError {
+        match self.shape {
+            Shape::NotLoaded | Shape::Token(_) => TouchIdError::NotHere(self.source),
+            Shape::LocalAuthentication(code) if is_declined(code) => {
+                TouchIdError::Declined(self.source)
+            }
+            Shape::LocalAuthentication(_) | Shape::Status(_) | Shape::Other => {
+                TouchIdError::Enclave(self.source)
+            }
+        }
+    }
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn is_declined(code: isize) -> bool {
+    DECLINED.contains(&code)
+}
+
+/// What a silent check says of the lock: [`Health::Live`] only when the enclave refused for want of a
+/// person, and the refusal's own reading otherwise.
+#[cfg(any(test, target_os = "macos"))]
+fn health_of(check: &Result<(), Refused>) -> Health {
+    match check {
+        Ok(()) => Health::Live,
+        Err(refused) => refused.shape.health(),
+    }
 }
 
 #[cfg(any(test, target_os = "macos"))]
@@ -232,7 +308,7 @@ impl EnclaveParams {
     /// Asks nothing of anyone.
     pub(crate) fn enroll(enclave: &impl Enclave) -> Result<(Self, Kek), MethodError> {
         let policy = Policy::BiometryCurrentSet;
-        let (blob, enclave_key) = enclave.create(policy)?;
+        let (blob, enclave_key) = enclave.create(policy).map_err(Refused::into_error)?;
         Self::enroll_with(policy, blob, enclave_key, &one_time_key()?)
     }
 
@@ -264,20 +340,30 @@ impl EnclaveParams {
     }
 
     /// The key a touch makes under these parameters, through `enclave`, with `reason` in the dialog.
+    ///
+    /// The key is asked first with no dialog allowed: one the enclave refuses outright (another
+    /// Mac's, a damaged one, one made under other enrolled fingers) is refused here, before a dialog
+    /// that could not open it. A key that cannot be checked now is still asked with the dialog.
     pub(crate) fn kek(&self, enclave: &impl Enclave, reason: &str) -> Result<Kek, MethodError> {
-        let key = enclave.load(&self.blob, &self.enclave_key)?;
-        let shared = key.agree(&self.one_time, reason)?;
+        let key = enclave
+            .load(&self.blob, &self.enclave_key)
+            .map_err(Refused::into_error)?;
+        if let Err(refused) = key.check()
+            && refused.shape.health() == Health::Dead
+        {
+            return Err(refused.into_error().into());
+        }
+        let shared = key
+            .agree(&self.one_time, reason)
+            .map_err(Refused::into_error)?;
         Ok(derive(&shared[..], &self.one_time, &self.enclave_key)?)
     }
 
-    /// Whether this lock would open on this machine, asked of `enclave` without showing anything. A
-    /// blob that does not load here, or loads as another key, is certainly dead; any other failure to
-    /// load says only that the question could not be put now.
+    /// Whether this lock would open on this machine, asked of `enclave` without showing anything.
     pub(crate) fn health(&self, enclave: &impl Enclave) -> Health {
         match enclave.load(&self.blob, &self.enclave_key) {
-            Ok(key) => key.health(),
-            Err(TouchIdError::NotHere(_)) => Health::Dead,
-            Err(_) => Health::Unchecked,
+            Ok(key) => health_of(&key.check()),
+            Err(refused) => refused.shape.health(),
         }
     }
 }
@@ -330,60 +416,59 @@ pub(crate) struct SecureEnclave;
 impl Enclave for SecureEnclave {
     type Key = keystore_enclave::Key;
 
-    fn create(&self, policy: Policy) -> Result<(Blob, Point), TouchIdError> {
+    fn create(&self, policy: Policy) -> Result<(Blob, Point), Refused> {
         let policy = match policy {
             Policy::BiometryCurrentSet => keystore_enclave::Policy::BiometryCurrentSet,
         };
         let (blob, public) = keystore_enclave::create(policy).map_err(refused)?;
         let found = blob.len();
+        let unusable = |fault| Refused {
+            shape: Shape::Other,
+            source: crate::error::EnclaveError::new(fault),
+        };
         let blob = Blob::new(blob)
             .ok_or_else(|| unusable(crate::error::Unusable::BlobLength { found }))?;
         let public = Point::parse(public).map_err(|_| unusable(crate::error::Unusable::Point))?;
         Ok((blob, public))
     }
 
-    fn load(&self, blob: &Blob, public: &Point) -> Result<Self::Key, TouchIdError> {
+    fn load(&self, blob: &Blob, public: &Point) -> Result<Self::Key, Refused> {
         keystore_enclave::load(blob.bytes(), public.bytes()).map_err(refused)
     }
 }
 
 #[cfg(target_os = "macos")]
 impl Agree for keystore_enclave::Key {
-    fn agree(
-        &self,
-        peer: &Point,
-        reason: &str,
-    ) -> Result<Zeroizing<[u8; SECRET_LEN]>, TouchIdError> {
+    fn agree(&self, peer: &Point, reason: &str) -> Result<Zeroizing<[u8; SECRET_LEN]>, Refused> {
         keystore_enclave::Key::agree(self, peer.bytes(), reason).map_err(refused)
     }
 
-    fn health(&self) -> Health {
-        match self.check() {
-            Ok(()) => Health::Live,
-            // The token refused the key itself: another Mac's blob, a damaged one, or one the enclave
-            // no longer holds. A blob that reloads and is then refused by CryptoTokenKit at the check,
-            // before LocalAuthentication answers, arrives here as `Load` too. Nothing will open it here.
-            Err(keystore_enclave::Error::Load(_) | keystore_enclave::Error::OtherKey) => {
-                Health::Dead
-            }
-            // A lockout, a closed lid, a locked screen: the key may well open later, so it is never
-            // reported as gone.
-            Err(_) => Health::Unchecked,
-        }
+    fn check(&self) -> Result<(), Refused> {
+        keystore_enclave::Key::check(self).map_err(refused)
     }
 }
 
-/// The enclave's refusal, sorted into what a caller tells a person.
+/// The enclave's error, by its shape: the system's domain and code where it gave one.
 #[cfg(target_os = "macos")]
-fn refused(error: keystore_enclave::Error) -> TouchIdError {
-    use crate::error::EnclaveError;
+fn refused(error: keystore_enclave::Error) -> Refused {
+    use keystore_enclave::Error;
 
-    match error {
-        keystore_enclave::Error::Load(_) | keystore_enclave::Error::OtherKey => {
-            TouchIdError::NotHere(EnclaveError::new(error))
+    let shape = match &error {
+        Error::OtherKey => Shape::NotLoaded,
+        Error::Load(os) if !os.domain().contains("CryptoTokenKit") => Shape::NotLoaded,
+        Error::Load(os) | Error::Declined(os) | Error::NotInteractive(os) | Error::Agree(os) => {
+            match os.domain() {
+                "CryptoTokenKit" => Shape::Token(os.code()),
+                "com.apple.LocalAuthentication" => Shape::LocalAuthentication(os.code()),
+                "NSOSStatusErrorDomain" => Shape::Status(os.code()),
+                _ => Shape::Other,
+            }
         }
-        keystore_enclave::Error::Declined(_) => TouchIdError::Declined(EnclaveError::new(error)),
-        _ => TouchIdError::Enclave(EnclaveError::new(error)),
+        _ => Shape::Other,
+    };
+    Refused {
+        shape,
+        source: crate::error::EnclaveError::new(error),
     }
 }
 

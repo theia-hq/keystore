@@ -11,25 +11,34 @@ use core::cell::Cell;
 use p256::elliptic_curve::sec1::ToEncodedPoint as _;
 use zeroize::Zeroizing;
 
-use super::{Agree, Blob, Enclave, EnclaveParams, POINT_LEN, Point, Policy, SECRET_LEN};
+use super::{
+    Agree, Blob, Enclave, EnclaveParams, POINT_LEN, Point, Policy, Refused, SECRET_LEN, Shape,
+};
 use crate::error::{EnclaveError, FormatError, TouchIdError};
 use crate::stored::Health;
 
-/// What a touch on the stand-in does.
+/// What this Mac's stand-in enclave answers, as the founder's run on real hardware saw it. The
+/// stand-in answers with a refusal's shape (whose, and its code), never a verdict, so the core's
+/// reading of each code is what the tests below exercise.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Touch {
-    /// A finger enrolled when the key was made: the key agrees.
+    /// At an unlocked screen: a silent check answers `-1004`, and a touch agrees.
     Matches,
-    /// The person cancels the dialog.
+    /// The person cancels the dialog: LocalAuthentication `-2`.
     Cancelled,
-    /// The enclave refuses the key itself at the check, without asking anyone: what the real one does
-    /// (CryptoTokenKit, before LocalAuthentication answers) for a damaged blob or another Mac's. A
-    /// key ended by a change to the enrolled fingers may answer this way too; that is not yet observed.
-    Ended,
-    /// Biometry is locked out after failed touches: the enclave refuses, but not the key itself, so
-    /// the key may open again later.
+    /// A finger was enrolled since the key was made: CryptoTokenKit `-3`, at the silent check and
+    /// after the dialog alike. Removing that finger brings the key back.
+    FingersChanged,
+    /// The silent check passes, and then the enclave turns the agreement down after the dialog with
+    /// CryptoTokenKit `-3`, as it did on the founder's run for a key under a newly enrolled finger.
+    TurnedDownAfterDialog,
+    /// The screen is locked: LocalAuthentication `-4`.
+    ScreenLocked,
+    /// Touch ID is locked out after failed touches: LocalAuthentication `-8`.
     LockedOut,
-    /// The enclave fails to load the key with an answer that says nothing about the key.
+    /// After a lockout, the enclave answers with status `-25308`.
+    Busy,
+    /// The key does not load, with an answer that names no code.
     Unrecognised,
 }
 
@@ -44,12 +53,12 @@ pub(crate) fn on_mac(mac: u8) {
     MAC.set(mac);
 }
 
-/// What every touch from here on does in this test.
+/// What this Mac answers from here on in this test.
 pub(crate) fn touch(touch: Touch) {
     TOUCH.set(touch);
 }
 
-/// How many touches this test has asked for.
+/// How many touches this test has asked for: dialogs shown, never silent checks.
 pub(crate) fn touches() -> u32 {
     TOUCHES.get()
 }
@@ -61,25 +70,20 @@ pub(crate) struct StandIn;
 /// A stand-in key, loaded.
 pub(crate) struct StandInKey(p256::SecretKey);
 
+/// The stand-in's refusal, carried as the cause, so a test can see the code a refusal came from.
 #[derive(Debug, thiserror::Error)]
-enum StandInError {
-    #[error("the blob was made on another Mac")]
-    OtherMac,
-    #[error("the blob is damaged")]
-    Damaged,
-    #[error("the blob holds another key")]
-    OtherKey,
-    #[error("the touch was cancelled")]
-    Cancelled,
-    #[error("the enrolled fingers changed")]
-    Ended,
-    #[error("biometry is locked out")]
-    LockedOut,
-    #[error("the enclave gave an answer that says nothing about the key")]
-    Unrecognised,
-    #[error("the peer is not a P-256 public key")]
-    Peer,
+#[error("the stand-in enclave refused: {0:?}")]
+pub(crate) struct StandInRefusal(pub(crate) Shape);
+
+fn refused(shape: Shape) -> Refused {
+    Refused {
+        shape,
+        source: EnclaveError::new(StandInRefusal(shape)),
+    }
 }
+
+/// LocalAuthentication's "a person is needed, and none may be asked".
+const NEEDS_A_PERSON: isize = -1004;
 
 pub(crate) fn point_of(key: &p256::SecretKey) -> Point {
     let mut bytes = [0; POINT_LEN];
@@ -97,7 +101,7 @@ pub(crate) fn blob(mac: u8, scalar: &[u8; 32]) -> Blob {
 impl Enclave for StandIn {
     type Key = StandInKey;
 
-    fn create(&self, policy: Policy) -> Result<(Blob, Point), TouchIdError> {
+    fn create(&self, policy: Policy) -> Result<(Blob, Point), Refused> {
         assert_eq!(policy, Policy::BiometryCurrentSet);
         let mut scalar = [0; 32];
         getrandom::fill(&mut scalar).unwrap();
@@ -106,71 +110,67 @@ impl Enclave for StandIn {
         Ok((blob(MAC.get(), &scalar), point_of(&key)))
     }
 
-    fn load(&self, blob: &Blob, public: &Point) -> Result<StandInKey, TouchIdError> {
+    fn load(&self, blob: &Blob, public: &Point) -> Result<StandInKey, Refused> {
         if TOUCH.get() == Touch::Unrecognised {
-            return Err(TouchIdError::Enclave(EnclaveError::new(
-                StandInError::Unrecognised,
-            )));
+            return Err(refused(Shape::Other));
         }
-        let not_here = |why| TouchIdError::NotHere(EnclaveError::new(why));
+        // Another Mac's blob, or a damaged one, does not reload here.
         let Some((&mac, scalar)) = blob.bytes().split_first() else {
-            return Err(not_here(StandInError::Damaged));
+            return Err(refused(Shape::NotLoaded));
         };
         if mac != MAC.get() {
-            return Err(not_here(StandInError::OtherMac));
+            return Err(refused(Shape::NotLoaded));
         }
-        let key =
-            p256::SecretKey::from_slice(scalar).map_err(|_| not_here(StandInError::Damaged))?;
+        let key = p256::SecretKey::from_slice(scalar).map_err(|_| refused(Shape::NotLoaded))?;
         if point_of(&key) != *public {
-            return Err(not_here(StandInError::OtherKey));
+            return Err(refused(Shape::NotLoaded));
         }
         Ok(StandInKey(key))
     }
 }
 
+impl StandInKey {
+    /// What this Mac answers a request for the agreement, with or without a dialog.
+    fn answer(dialog: bool) -> Result<(), Refused> {
+        let shape = match TOUCH.get() {
+            Touch::Matches if dialog => return Ok(()),
+            Touch::Cancelled if dialog => Shape::LocalAuthentication(-2),
+            Touch::Matches | Touch::Cancelled | Touch::TurnedDownAfterDialog if !dialog => {
+                Shape::LocalAuthentication(NEEDS_A_PERSON)
+            }
+            Touch::FingersChanged | Touch::TurnedDownAfterDialog => Shape::Token(-3),
+            Touch::ScreenLocked => Shape::LocalAuthentication(-4),
+            Touch::LockedOut => Shape::LocalAuthentication(-8),
+            Touch::Busy => Shape::Status(-25308),
+            Touch::Matches | Touch::Cancelled | Touch::Unrecognised => Shape::Other,
+        };
+        Err(refused(shape))
+    }
+}
+
 impl Agree for StandInKey {
-    fn agree(
-        &self,
-        peer: &Point,
-        reason: &str,
-    ) -> Result<Zeroizing<[u8; SECRET_LEN]>, TouchIdError> {
+    fn agree(&self, peer: &Point, reason: &str) -> Result<Zeroizing<[u8; SECRET_LEN]>, Refused> {
         assert!(
             !reason.is_empty(),
             "a touch is never asked for with no reason"
         );
         TOUCHES.set(TOUCHES.get() + 1);
-        match TOUCH.get() {
-            Touch::Matches => {}
-            Touch::Cancelled => {
-                return Err(TouchIdError::Declined(EnclaveError::new(
-                    StandInError::Cancelled,
-                )));
-            }
-            Touch::Ended => {
-                return Err(TouchIdError::NotHere(EnclaveError::new(
-                    StandInError::Ended,
-                )));
-            }
-            Touch::LockedOut | Touch::Unrecognised => {
-                return Err(TouchIdError::Enclave(EnclaveError::new(
-                    StandInError::LockedOut,
-                )));
-            }
-        }
+        Self::answer(true)?;
         // The real enclave refuses a peer off the curve the same way, as its own failure.
-        let peer = p256::PublicKey::from_sec1_bytes(peer.bytes())
-            .map_err(|_| TouchIdError::Enclave(EnclaveError::new(StandInError::Peer)))?;
+        let peer =
+            p256::PublicKey::from_sec1_bytes(peer.bytes()).map_err(|_| refused(Shape::Other))?;
         let shared = p256::ecdh::diffie_hellman(self.0.to_nonzero_scalar(), peer.as_affine());
         let mut secret = Zeroizing::new([0; SECRET_LEN]);
         secret.copy_from_slice(shared.raw_secret_bytes());
         Ok(secret)
     }
 
-    fn health(&self) -> Health {
-        match TOUCH.get() {
-            Touch::Matches | Touch::Cancelled => Health::Live,
-            Touch::Ended => Health::Dead,
-            Touch::LockedOut | Touch::Unrecognised => Health::Unchecked,
+    fn check(&self) -> Result<(), Refused> {
+        // The real check is a refusal by design; `-1004` is the one that says the key is here.
+        match Self::answer(false) {
+            Ok(()) => Ok(()),
+            Err(refusal) if refusal.shape == Shape::LocalAuthentication(NEEDS_A_PERSON) => Ok(()),
+            Err(refusal) => Err(refusal),
         }
     }
 }
@@ -275,20 +275,62 @@ fn another_macs_lock_does_not_load_here_and_asks_for_no_touch() {
 }
 
 #[test]
-fn a_lock_the_enclave_refuses_reads_as_dead_without_a_touch() {
+fn each_silent_answer_reads_as_its_code_says() {
     let (params, _) = enrolled();
-    assert_eq!(params.health(&StandIn), Health::Live);
-    touch(Touch::Ended);
-    assert_eq!(params.health(&StandIn), Health::Dead);
+    for (answer, health) in [
+        (Touch::Matches, Health::Live),
+        // The enclave's token refuses the key itself: it does not open with the fingers enrolled now.
+        (Touch::FingersChanged, Health::Dead),
+        // A locked screen, a lockout, a busy enclave: none says the key will not open later.
+        (Touch::ScreenLocked, Health::Unchecked),
+        (Touch::LockedOut, Health::Unchecked),
+        (Touch::Busy, Health::Unchecked),
+    ] {
+        touch(answer);
+        assert_eq!(params.health(&StandIn), health, "{answer:?}");
+    }
     assert_eq!(touches(), 0);
 }
 
 #[test]
-fn a_lockout_reads_as_unchecked_never_dead() {
+fn a_lock_that_stops_opening_when_a_finger_is_enrolled_opens_again_when_it_is_removed() {
     let (params, _) = enrolled();
-    touch(Touch::LockedOut);
-    assert_eq!(params.health(&StandIn), Health::Unchecked);
+    touch(Touch::FingersChanged);
+    assert_eq!(params.health(&StandIn), Health::Dead);
+    touch(Touch::Matches);
+    assert_eq!(params.health(&StandIn), Health::Live);
+    assert!(params.kek(&StandIn, "open the test key").is_ok());
+}
+
+#[test]
+fn a_key_the_enclave_refuses_is_refused_before_a_dialog_and_never_as_a_cancel() {
+    let (params, _) = enrolled();
+    let refusal = |params: &EnclaveParams| match params.kek(&StandIn, "open the test key") {
+        Err(crate::error::MethodError::TouchId(error)) => error,
+        Err(other) => panic!("expected a touch-id refusal, found {other:?}"),
+        Ok(_) => panic!("the key opened"),
+    };
+
+    // Refused at the silent check: no dialog is shown for a key that cannot open.
+    touch(Touch::FingersChanged);
+    assert!(matches!(refusal(&params), TouchIdError::NotHere(_)));
     assert_eq!(touches(), 0);
+
+    // Turned down after the dialog by the enclave's token: the same refusal, not a cancel.
+    touch(Touch::TurnedDownAfterDialog);
+    assert!(matches!(refusal(&params), TouchIdError::NotHere(_)));
+    assert_eq!(touches(), 1);
+
+    // A person who cancels is told apart.
+    touch(Touch::Cancelled);
+    assert!(matches!(refusal(&params), TouchIdError::Declined(_)));
+    assert_eq!(touches(), 2);
+
+    // A locked screen that cancels the dialog is a cancel too; a lockout is the enclave's failure.
+    touch(Touch::ScreenLocked);
+    assert!(matches!(refusal(&params), TouchIdError::Declined(_)));
+    touch(Touch::LockedOut);
+    assert!(matches!(refusal(&params), TouchIdError::Enclave(_)));
 }
 
 #[test]
