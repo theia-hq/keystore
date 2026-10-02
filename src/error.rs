@@ -117,12 +117,36 @@ pub enum Error {
         /// The key file.
         path: PathBuf,
     },
-    /// A lock removal asked to take a root key's passphrase lock. A root key always keeps it: it is
-    /// the lock that opens a copy of the file on any machine.
+    /// A lock change would leave a root key with no lock that opens on another machine: removing its
+    /// passphrase lock, or sealing a plain root under a lock that opens on this machine alone. A root
+    /// key always keeps one, because it is how a copy of the file opens anywhere else.
     #[error("a root key always keeps its passphrase lock; {} was not changed", path.display())]
     RootPassphrase {
         /// The key file.
         path: PathBuf,
+    },
+    /// A lock change asked to set a root key's passphrase lock while opening the file with a lock
+    /// that opens on this machine alone. Whoever holds only that lock must not be able to set a
+    /// passphrase that opens every copy of the root.
+    #[error(
+        "a root key's passphrase is set only with its passphrase; {} was not changed",
+        path.display()
+    )]
+    RootPassphraseNeeded {
+        /// The key file.
+        path: PathBuf,
+    },
+    /// A lock removal would leave no lock that opens the file on this machine: none of the others
+    /// is the one that opened it, and none can open here (another Mac's `touch-id` lock, say).
+    #[error(
+        "removing the {method} lock would leave {} with no lock that opens on this machine; it was not changed",
+        path.display()
+    )]
+    NoneOpensHere {
+        /// The key file.
+        path: PathBuf,
+        /// The method whose removal was refused.
+        method: Method,
     },
     /// A lock change found no file to change.
     #[error("there is no key file at {}", path.display())]
@@ -191,6 +215,15 @@ pub enum Error {
         #[source]
         source: io::Error,
     },
+    /// A `touch-id` lock could not be made or did not open.
+    #[error("could not use the touch-id lock of the key file {}", path.display())]
+    TouchId {
+        /// The key file.
+        path: PathBuf,
+        /// Why.
+        #[source]
+        source: TouchIdError,
+    },
     /// Sealing or unlocking could not run.
     #[error("could not seal or unlock the key file {}", path.display())]
     Crypto {
@@ -249,20 +282,41 @@ pub enum FormatError {
     /// A sealed file with no locks: nothing could open it, so it is not a sealed key.
     #[error("the sealed key has no locks")]
     NoLocks,
+    /// A sealed root key with no lock that opens on another machine. A root key always keeps its
+    /// passphrase lock, so a list without one was not written by this crate.
+    #[error("the sealed root key has no passphrase lock")]
+    NoPortableLock,
     /// Two locks of one method. A file holds at most one of each.
     #[error("the sealed key has more than one {method} lock")]
     DuplicateLock {
         /// The method named twice.
         method: Method,
     },
-    /// A lock whose body length is not its method's, refused before its body is read.
-    #[error("a {method} lock is {} bytes, and this one says {found}", method.body_len())]
+    /// A lock whose body length is not one its method can have: past the method's most, refused
+    /// before the body is read, or not what the body's own fields add up to.
+    #[error("a {method} lock cannot be {found} bytes")]
     LockLength {
         /// The lock's method.
         method: Method,
         /// The length the record declares.
         found: u16,
     },
+    /// A `touch-id` lock's access policy this build does not know.
+    #[error("touch-id policy {found} is not one this build knows")]
+    Policy {
+        /// The policy byte.
+        found: u8,
+    },
+    /// A `touch-id` lock whose blob length does not account for its parameters: no blob, one past
+    /// the cap, or one that leaves the one-time key the wrong size.
+    #[error("a touch-id lock's blob of {found} bytes does not fit its lock")]
+    Blob {
+        /// The blob length the lock declares.
+        found: u16,
+    },
+    /// A `touch-id` lock's public key is not an uncompressed P-256 point.
+    #[error("a touch-id lock holds a public key that is not an uncompressed point")]
+    Point,
     /// A key derivation function this build does not know.
     #[error("key derivation function {found} is not one this build knows")]
     Kdf {
@@ -309,6 +363,16 @@ enum Primitive {
     // A value rather than a panic for the same reason as `Cipher`.
     #[error("too many locks to seal: a key file holds at most 255")]
     LockCount,
+    // A scalar outside the curve's order is about one draw in 2^32; several in a row is a random
+    // source that is not random.
+    #[cfg(any(test, target_os = "macos"))]
+    #[error("could not draw a one-time key")]
+    OneTimeKey,
+    // HKDF refuses only an output longer than 255 hashes, and 32 bytes is one. A value rather than a
+    // panic for the same reason as `Cipher`.
+    #[cfg(any(test, target_os = "macos"))]
+    #[error("hkdf could not derive a key")]
+    Derive,
 }
 
 impl CryptoError {
@@ -330,5 +394,82 @@ impl CryptoError {
 
     pub(crate) const fn lock_count() -> Self {
         Self(Primitive::LockCount)
+    }
+
+    #[cfg(any(test, target_os = "macos"))]
+    pub(crate) const fn one_time_key() -> Self {
+        Self(Primitive::OneTimeKey)
+    }
+
+    #[cfg(any(test, target_os = "macos"))]
+    pub(crate) const fn derive() -> Self {
+        Self(Primitive::Derive)
+    }
+}
+
+/// Why a `touch-id` lock could not be made or opened.
+///
+/// The variants are the cases a caller tells a person apart: this machine cannot do it at all, the
+/// lock is not this Mac's, or the person said no. The enclave's own error rides the `source()` chain.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum TouchIdError {
+    /// This build has no Secure Enclave to ask: it is not a macOS build.
+    #[error("this build has no secure enclave")]
+    Unavailable,
+    /// This Mac's enclave does not hold the lock's key: a lock made on another Mac, one ended by a
+    /// change to the enrolled fingers, or a damaged one.
+    #[error("this machine's secure enclave does not hold the lock's key")]
+    NotHere(#[source] EnclaveError),
+    /// The person cancelled, or the touch did not match.
+    #[error("the touch was cancelled or did not match")]
+    Declined(#[source] EnclaveError),
+    /// The enclave could not make the key or agree the secret.
+    #[error("the secure enclave failed")]
+    Enclave(#[source] EnclaveError),
+}
+
+/// What the enclave said, kept as the cause of a [`TouchIdError`]. Opaque, so the enclave's own types
+/// stay out of this crate's surface and out of a build that has no enclave.
+#[derive(Debug, thiserror::Error)]
+#[error(transparent)]
+pub struct EnclaveError(Box<dyn core::error::Error + Send + Sync>);
+
+impl EnclaveError {
+    #[cfg(any(test, target_os = "macos"))]
+    pub(crate) fn new(source: impl core::error::Error + Send + Sync + 'static) -> Self {
+        Self(Box::new(source))
+    }
+}
+
+/// What the enclave handed back that a lock cannot hold. Raised on this side of the enclave, so it
+/// rides an [`EnclaveError`] like the enclave's own errors do.
+#[cfg(any(test, target_os = "macos"))]
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum Unusable {
+    #[error("the secure enclave's public key is not a P-256 point")]
+    Point,
+    #[cfg(target_os = "macos")]
+    #[error("the secure enclave's key blob is {found} bytes, outside what a lock holds")]
+    BlobLength { found: usize },
+}
+
+/// Why a lock's method could not make or open its key: the primitives failed, or the enclave did.
+/// Crate-private: a key file attaches its path and reports each as its own [`Error`] variant.
+#[derive(Debug)]
+pub(crate) enum MethodError {
+    Crypto(CryptoError),
+    TouchId(TouchIdError),
+}
+
+impl From<CryptoError> for MethodError {
+    fn from(source: CryptoError) -> Self {
+        Self::Crypto(source)
+    }
+}
+
+impl From<TouchIdError> for MethodError {
+    fn from(source: TouchIdError) -> Self {
+        Self::TouchId(source)
     }
 }

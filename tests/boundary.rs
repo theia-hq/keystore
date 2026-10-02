@@ -123,7 +123,18 @@ fn the_storage_core_depends_on_registry_crates_only() {
         manifest_keys(&manifest, "[target.'cfg(unix)'.dependencies]"),
         ["libc"]
     );
-    // A git or path source is how a crate of the family would arrive: none may.
+    // On a Mac, the `touch-id` lock: its derivation, and the enclave crate beside this one.
+    assert_eq!(
+        manifest_keys(
+            &manifest,
+            "[target.'cfg(target_os = \"macos\")'.dependencies]"
+        ),
+        ["hkdf", "keystore-enclave", "p256", "sha2"]
+    );
+    // A git or path source is how a crate of the family would arrive: none may. The one exception is
+    // the enclave crate, which is this repository's own, beside this one, and depends on nothing of
+    // this crate's.
+    const OWN: &str = "keystore-enclave={path=\"keystore-enclave\"}";
     let lines = dependency_lines(&manifest);
     assert!(
         lines.len() >= 8,
@@ -132,9 +143,10 @@ fn the_storage_core_depends_on_registry_crates_only() {
     for line in lines {
         let spec: String = line.split_whitespace().collect();
         assert!(
-            !["git=", "path=", "workspace="]
-                .iter()
-                .any(|source| spec.contains(source)),
+            spec == OWN
+                || !["git=", "path=", "workspace="]
+                    .iter()
+                    .any(|source| spec.contains(source)),
             "`{line}` is a dependency from outside the registry"
         );
     }
@@ -311,18 +323,31 @@ fn the_secret_owners_are_built_to_wipe() {
         lock.contains("pub(crate) struct Kek(Box<Zeroizing<[u8; Kek::LEN]>>);"),
         "the key-encryption key must live in a boxed `Zeroizing`"
     );
-    let method = read("lock/passphrase.rs");
-    assert!(
-        method.contains("let mut kek = Kek::zeroed();") && method.contains("&mut kek.fill()[..]"),
-        "the passphrase method must derive its key straight into the key's box"
-    );
+    for name in ["lock/passphrase.rs", "lock/enclave.rs"] {
+        let method = read(name);
+        assert!(
+            method.contains("let mut kek = Kek::zeroed();")
+                && method.contains("&mut kek.fill()[..]"),
+            "{name} must derive its key straight into the key's box"
+        );
+    }
 }
 
 /// The crate paths a method module may name: its errors, the key it makes, and its caller's input.
 const METHOD_CRATE_PATHS: &[&str] = &["crate::error::", "crate::lock::Kek", "crate::passphrase::"];
 
-/// The external crates a method module may name: its derivation and its randomness, and the wipe.
-const METHOD_CRATES: &[&str] = &["argon2", "core", "getrandom", "zeroize"];
+/// The external crates a method module may name: its derivation and its randomness, the curve and
+/// the enclave a `touch-id` lock agrees through, and the wipe.
+const METHOD_CRATES: &[&str] = &[
+    "argon2",
+    "core",
+    "getrandom",
+    "hkdf",
+    "keystore_enclave",
+    "p256",
+    "sha2",
+    "zeroize",
+];
 
 /// Names any module may start a path from without importing them.
 const PRELUDE: &[&str] = &[
@@ -416,10 +441,12 @@ fn no_method_sees_the_file_key() {
         .into_iter()
         .filter(|(name, _)| name.starts_with("lock/"))
         .collect();
-    assert!(
-        methods.iter().any(|(name, _)| name == "lock/passphrase.rs"),
-        "the scan did not reach the passphrase method"
-    );
+    for method in ["lock/passphrase.rs", "lock/enclave.rs"] {
+        assert!(
+            methods.iter().any(|(name, _)| name == method),
+            "the scan did not reach {method}"
+        );
+    }
     for (name, source) in &methods {
         let code = code_only(source);
         for token in code.split(|c: char| !(c.is_alphanumeric() || c == '_')) {

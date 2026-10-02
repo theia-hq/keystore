@@ -24,7 +24,8 @@
 //! unknown value is refused by name, never guessed at. Each lock's own layout is in `lock`.
 //!
 //! A file holds at most one lock per method, so the list is bounded by the methods this build knows,
-//! and every length in it is judged before the bytes it covers are read.
+//! and every length in it is judged before the bytes it covers are read. A root key's list always
+//! holds a lock that opens on another machine; one without is refused as it is read.
 //!
 //! The kind says what the key is FOR, and a file is only ever read as the kind its reader expects: a
 //! sealed device key presented where a root key belongs is refused by its kind, and so is the reverse.
@@ -33,7 +34,7 @@
 //! nothing else.
 
 use crate::cipher::{self, Failed, NONCE_LEN, SEALED_LEN};
-use crate::error::{CryptoError, FormatError};
+use crate::error::{CryptoError, FormatError, MethodError, TouchIdError};
 use crate::kind::Kind;
 use crate::lock::{FileKey, Lock};
 use crate::method::{Method, NewLock, Unlock};
@@ -185,8 +186,7 @@ impl Envelope {
         }
         // The count needs no bound of its own: each lock must name a method this build knows, and no
         // method twice, so a list longer than the methods refuses at its first extra lock, before
-        // anything past that lock's method byte is read. A root's passphrase lock needs no check here
-        // while the passphrase is the only method: any list of at least one known lock holds it.
+        // anything past that lock's method byte is read.
         let mut locks: Vec<Lock> = Vec::new();
         for _ in 0..count {
             let found = reader.byte()?;
@@ -197,13 +197,19 @@ impl Envelope {
                 return Err(FormatError::DuplicateLock { method });
             }
             let length = u16::from_be_bytes(reader.array()?);
-            if length != method.body_len() {
+            if !method.holds_body_of(length) {
                 return Err(FormatError::LockLength {
                     method,
                     found: length,
                 });
             }
             locks.push(Lock::parse(method, reader.take(usize::from(length))?)?);
+        }
+        // A root key keeps a lock that opens a copy of it on another machine, and this crate never
+        // writes one without. Said in those words rather than by naming a method, so a second lock
+        // that travels satisfies it the day it lands.
+        if expected == Kind::Root && !locks.iter().any(|lock| lock.method().portable()) {
+            return Err(FormatError::NoPortableLock);
         }
         let covered = reader.consumed().to_vec();
         let seed_nonce = reader.array()?;
@@ -227,17 +233,17 @@ impl Envelope {
         secret: &Secret,
         kind: Kind,
         lock: NewLock<'_>,
-    ) -> Result<Vec<u8>, CryptoError> {
+    ) -> Result<Vec<u8>, MethodError> {
         let file_key = FileKey::generate()?;
         let header = header(kind, secret.public_key());
         let lock = Lock::wrap(lock, &file_key, &header)?;
-        assemble(
+        Ok(assemble(
             &header,
             &[&lock],
             &file_key,
             secret,
             &cipher::fresh_nonce()?,
-        )
+        )?)
     }
 
     /// Open the file with `with`: its lock unwraps the file key, and the file key opens the seed. The
@@ -287,20 +293,20 @@ impl Envelope {
         &self,
         opened: &Opened,
         new: NewLock<'_>,
-    ) -> Result<Vec<u8>, CryptoError> {
+    ) -> Result<Vec<u8>, MethodError> {
         let new = Lock::wrap(new, &opened.file_key, &self.header)?;
         let mut locks: Vec<&Lock> = self.locks.iter().collect();
         match locks.iter().position(|lock| lock.method() == new.method()) {
             Some(at) => locks[at] = &new,
             None => locks.push(&new),
         }
-        assemble(
+        Ok(assemble(
             &self.header,
             &locks,
             &opened.file_key,
             &opened.secret,
             &cipher::fresh_nonce()?,
-        )
+        )?)
     }
 
     /// This file without its lock of `method`, or `None` when that is its last lock, and so nothing
@@ -338,6 +344,12 @@ impl Envelope {
         self.lock(method).is_some()
     }
 
+    /// Whether this file's lock of `method` can open it on this machine, asked without showing
+    /// anything; `None` when the file holds no such lock.
+    pub(crate) fn opens_here(&self, method: Method) -> Option<bool> {
+        self.lock(method).map(Lock::opens_here)
+    }
+
     fn lock(&self, method: Method) -> Option<&Lock> {
         self.locks.iter().find(|lock| lock.method() == method)
     }
@@ -357,6 +369,8 @@ pub(crate) enum Refusal {
     Inconsistent,
     /// The file holds no lock of this method.
     NoLock(Method),
+    /// The `touch-id` lock did not give its key.
+    TouchId(TouchIdError),
     /// Unlocking could not run.
     Crypto(CryptoError),
 }

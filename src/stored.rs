@@ -52,6 +52,21 @@ impl Locked {
         self.envelope.methods()
     }
 
+    /// Whether this file's lock of `method` can open it on this machine, read without asking anyone
+    /// for anything; `None` when the file holds no such lock.
+    ///
+    /// A passphrase lock is always [`Health::Live`]: whether the passphrase is right is known only by
+    /// trying it. A `touch-id` lock is live on the Mac whose enclave made it, while the fingers it was
+    /// made under are the ones enrolled; there, the enclave is asked with no dialog allowed, and
+    /// refuses only for want of a touch. Another Mac's lock, a damaged one, and one ended by a change
+    /// to the enrolled fingers are [`Health::Dead`], as is every `touch-id` lock on a build with no
+    /// enclave.
+    pub fn health(&self, method: Method) -> Option<Health> {
+        self.envelope
+            .opens_here(method)
+            .map(|live| if live { Health::Live } else { Health::Dead })
+    }
+
     /// The public key this file CLAIMS to seal, read from its header without unlocking.
     ///
     /// A claim, not a fact, until [`unlock`](Self::unlock) succeeds. The header is authenticated as
@@ -92,9 +107,20 @@ impl Locked {
             Refusal::Unlock => Error::Unlock { path },
             Refusal::Inconsistent => Error::Inconsistent { path },
             Refusal::NoLock(method) => Error::NoLock { path, method },
+            Refusal::TouchId(source) => Error::TouchId { path, source },
             Refusal::Crypto(source) => Error::Crypto { path, source },
         }
     }
+}
+
+/// Whether a lock can open its file on this machine, as [`Locked::health`] reads it without asking
+/// anyone for anything.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Health {
+    /// It can open the file here, given what its method asks for.
+    Live,
+    /// It cannot open the file here, whatever is offered.
+    Dead,
 }
 
 /// Names the file, the public key, and its locks, never the sealed bytes.

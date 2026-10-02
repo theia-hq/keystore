@@ -6,12 +6,13 @@
 //!
 //! | len | field                                                                  |
 //! | --- | ---------------------------------------------------------------------- |
-//! | ..  | the method's parameters, one fixed length per method                   |
+//! | ..  | the method's parameters                                                |
 //! | 24  | XChaCha20-Poly1305 nonce                                               |
 //! | 48  | the file key, encrypted under the method's key, then its Poly1305 tag  |
 //!
-//! Each method's parameters have one length, so a length is judged against the method before a byte
-//! of the body is read.
+//! Each method bounds its body's length, so a length is judged against the method before a byte of
+//! the body is read. A passphrase lock's parameters have one length; a `touch-id` lock's hold a blob
+//! the enclave sizes, up to a cap, and say its length themselves.
 //!
 //! **The seam.** A method turns what the caller holds, plus its stored parameters, into a 32-byte
 //! key-encryption key ([`Kek`]), and that is all it does. This module owns everything else: the file
@@ -25,18 +26,22 @@
 //! disturbs the ones that stay. What binds the list together is the seed's seal, which covers every
 //! byte before it (see `envelope`).
 
+pub(crate) mod enclave;
 pub(crate) mod passphrase;
 
 use zeroize::Zeroizing;
 
 use crate::cipher::{self, Failed, KEY_LEN, NONCE_LEN, SEALED_LEN};
 use crate::envelope::{HEADER_LEN, Refusal};
-use crate::error::{CryptoError, FormatError};
+use crate::error::{CryptoError, FormatError, MethodError};
+use crate::lock::enclave::EnclaveParams;
 use crate::lock::passphrase::PassphraseParams;
 use crate::method::{Method, NewLock, Unlock};
 
 /// Method byte: a passphrase lock.
 const METHOD_PASSPHRASE: u8 = 1;
+/// Method byte: a `touch-id` lock.
+const METHOD_TOUCH_ID: u8 = 2;
 
 /// What follows a method's parameters in every lock: the nonce, then the wrapped file key.
 const WRAP_LEN: usize = NONCE_LEN + SEALED_LEN;
@@ -46,6 +51,7 @@ impl Method {
     pub(crate) const fn byte(self) -> u8 {
         match self {
             Self::Passphrase => METHOD_PASSPHRASE,
+            Self::TouchId => METHOD_TOUCH_ID,
         }
     }
 
@@ -53,27 +59,31 @@ impl Method {
     pub(crate) const fn of_byte(byte: u8) -> Option<Self> {
         match byte {
             METHOD_PASSPHRASE => Some(Self::Passphrase),
+            METHOD_TOUCH_ID => Some(Self::TouchId),
             _ => None,
         }
     }
 
-    /// The one length this method's parameters have.
-    const fn params_len(self) -> usize {
+    /// The shortest and the longest this method's parameters can be.
+    const fn params_bounds(self) -> (usize, usize) {
         match self {
-            Self::Passphrase => passphrase::PARAMS_LEN,
+            Self::Passphrase => (passphrase::PARAMS_LEN, passphrase::PARAMS_LEN),
+            Self::TouchId => (enclave::PARAMS_MIN, enclave::PARAMS_MAX),
         }
     }
 
-    /// The one length this method's body has. A record declaring any other is refused before its
-    /// body is read, so a hostile length costs nothing.
-    pub(crate) const fn body_len(self) -> u16 {
-        // In range: asserted below for every method.
-        (self.params_len() + WRAP_LEN) as u16
+    /// Whether a record of this method may declare a body of `length` bytes. A record declaring any
+    /// other is refused before its body is read, so a hostile length costs nothing.
+    pub(crate) const fn holds_body_of(self, length: u16) -> bool {
+        let (shortest, longest) = self.params_bounds();
+        let length = length as usize;
+        shortest + WRAP_LEN <= length && length <= longest + WRAP_LEN
     }
 }
 
 // A body length is two bytes on disk.
 const _: () = assert!(passphrase::PARAMS_LEN + WRAP_LEN <= u16::MAX as usize);
+const _: () = assert!(enclave::PARAMS_MAX + WRAP_LEN <= u16::MAX as usize);
 
 /// The random key that seals a file's seed, and that every lock wraps.
 ///
@@ -142,47 +152,128 @@ impl Kek {
 pub(crate) enum Params {
     /// A passphrase lock's derivation.
     Passphrase(PassphraseParams),
+    /// A `touch-id` lock's enclave key and one-time key.
+    TouchId(EnclaveParams),
 }
 
 impl Params {
-    /// Parse a method's parameters, `bytes` of exactly its length.
+    /// Parse a method's parameters, `bytes` within its bounds.
     fn parse(method: Method, bytes: &[u8]) -> Result<Self, FormatError> {
         match method {
             Method::Passphrase => {
                 PassphraseParams::parse(exact(method, bytes)?).map(Self::Passphrase)
             }
+            Method::TouchId => EnclaveParams::parse(bytes).map(Self::TouchId),
         }
     }
 
     /// Fresh parameters for `new`, and the key they make with what `new` carries.
-    fn enroll(new: NewLock<'_>) -> Result<(Self, Kek), CryptoError> {
+    fn enroll(new: NewLock<'_>) -> Result<(Self, Kek), MethodError> {
         match new {
             NewLock::Passphrase(passphrase) => {
                 let (params, kek) = PassphraseParams::enroll(passphrase)?;
                 Ok((Self::Passphrase(params), kek))
             }
+            NewLock::TouchId { .. } => {
+                let (params, kek) = this_machine::enroll()?;
+                Ok((Self::TouchId(params), kek))
+            }
         }
     }
 
-    /// The key these parameters make with `with`, which the caller has matched to their method.
-    fn kek(&self, with: Unlock<'_>) -> Result<Kek, Refusal> {
+    /// The key these parameters make with `with`, or `None` when `with` opens another method.
+    fn kek(&self, with: Unlock<'_>) -> Option<Result<Kek, MethodError>> {
         match (self, with) {
             (Self::Passphrase(params), Unlock::Passphrase(passphrase)) => {
-                params.kek(passphrase).map_err(Refusal::Crypto)
+                Some(params.kek(passphrase).map_err(MethodError::Crypto))
             }
+            (Self::TouchId(params), Unlock::TouchId { reason }) => {
+                Some(this_machine::kek(params, reason))
+            }
+            (Self::Passphrase(_), Unlock::TouchId { .. })
+            | (Self::TouchId(_), Unlock::Passphrase(_)) => None,
+        }
+    }
+
+    /// Whether these parameters can make their key on this machine, asked without showing anything.
+    fn opens_here(&self) -> bool {
+        match self {
+            // A passphrase lock opens anywhere the passphrase is typed.
+            Self::Passphrase(_) => true,
+            Self::TouchId(params) => this_machine::opens_here(params),
         }
     }
 
     const fn method(&self) -> Method {
         match self {
             Self::Passphrase(_) => Method::Passphrase,
+            Self::TouchId(_) => Method::TouchId,
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Passphrase(_) => passphrase::PARAMS_LEN,
+            Self::TouchId(params) => params.len(),
         }
     }
 
     fn write(&self, out: &mut Vec<u8>) {
         match self {
             Self::Passphrase(params) => out.extend_from_slice(&params.bytes()),
+            Self::TouchId(params) => params.write(out),
         }
+    }
+}
+
+/// The enclave this build asks for a `touch-id` lock: the software stand-in under test, this Mac's
+/// Secure Enclave in a macOS build, and none anywhere else, where a `touch-id` lock is read and kept
+/// but never made or opened.
+mod this_machine {
+    use crate::error::MethodError;
+    #[cfg(not(any(test, target_os = "macos")))]
+    use crate::error::TouchIdError;
+    use crate::lock::Kek;
+    use crate::lock::enclave::EnclaveParams;
+
+    #[cfg(test)]
+    fn enclave() -> crate::lock::enclave::enclave_tests::StandIn {
+        crate::lock::enclave::enclave_tests::StandIn
+    }
+
+    #[cfg(all(not(test), target_os = "macos"))]
+    const fn enclave() -> crate::lock::enclave::SecureEnclave {
+        crate::lock::enclave::SecureEnclave
+    }
+
+    #[cfg(any(test, target_os = "macos"))]
+    pub(super) fn enroll() -> Result<(EnclaveParams, Kek), MethodError> {
+        EnclaveParams::enroll(&enclave())
+    }
+
+    #[cfg(any(test, target_os = "macos"))]
+    pub(super) fn kek(params: &EnclaveParams, reason: &str) -> Result<Kek, MethodError> {
+        params.kek(&enclave(), reason)
+    }
+
+    #[cfg(any(test, target_os = "macos"))]
+    pub(super) fn opens_here(params: &EnclaveParams) -> bool {
+        params.opens_here(&enclave())
+    }
+
+    #[cfg(not(any(test, target_os = "macos")))]
+    pub(super) fn enroll() -> Result<(EnclaveParams, Kek), MethodError> {
+        Err(TouchIdError::Unavailable.into())
+    }
+
+    #[cfg(not(any(test, target_os = "macos")))]
+    pub(super) fn kek(_: &EnclaveParams, _: &str) -> Result<Kek, MethodError> {
+        Err(TouchIdError::Unavailable.into())
+    }
+
+    #[cfg(not(any(test, target_os = "macos")))]
+    pub(super) const fn opens_here(_: &EnclaveParams) -> bool {
+        false
     }
 }
 
@@ -197,7 +288,12 @@ impl Lock {
     /// Parse a lock's body. The caller has already read the method and checked the body's length
     /// against it.
     pub(crate) fn parse(method: Method, body: &[u8]) -> Result<Self, FormatError> {
-        let Some((params, wrap)) = body.split_at_checked(method.params_len()) else {
+        // The wrap is the same length for every method, so it is split from the end, and whatever
+        // stands before it is the method's to parse.
+        let Some(at_wrap) = body.len().checked_sub(WRAP_LEN) else {
+            return Err(length(method, body));
+        };
+        let Some((params, wrap)) = body.split_at_checked(at_wrap) else {
             return Err(length(method, body));
         };
         let Some((nonce, wrapped)) = wrap.split_at_checked(NONCE_LEN) else {
@@ -216,9 +312,15 @@ impl Lock {
         new: NewLock<'_>,
         file_key: &FileKey,
         header: &[u8; HEADER_LEN],
-    ) -> Result<Self, CryptoError> {
+    ) -> Result<Self, MethodError> {
         let (params, kek) = Params::enroll(new)?;
-        Self::wrap_with(params, &kek, file_key, header, cipher::fresh_nonce()?)
+        Ok(Self::wrap_with(
+            params,
+            &kek,
+            file_key,
+            header,
+            cipher::fresh_nonce()?,
+        )?)
     }
 
     /// Wrap with every input chosen by the caller. Only [`wrap`](Self::wrap) reaches this outside
@@ -245,15 +347,20 @@ impl Lock {
         self.params.method()
     }
 
-    /// Unwrap the file key with `with`, which the caller has matched to this lock's method. A wrong
-    /// input and a damaged lock are the same refusal, because the cipher cannot tell them apart and
-    /// a refusal that tried would be a guess an attacker could probe.
+    /// Unwrap the file key with `with`, which must open this lock's method. A wrong input and a
+    /// damaged lock are the same refusal, because the cipher cannot tell them apart and a refusal
+    /// that tried would be a guess an attacker could probe.
     pub(crate) fn open(
         &self,
         with: Unlock<'_>,
         header: &[u8; HEADER_LEN],
     ) -> Result<FileKey, Refusal> {
-        let kek = self.params.kek(with)?;
+        let kek = match self.params.kek(with) {
+            Some(Ok(kek)) => kek,
+            Some(Err(MethodError::Crypto(source))) => return Err(Refusal::Crypto(source)),
+            Some(Err(MethodError::TouchId(source))) => return Err(Refusal::TouchId(source)),
+            None => return Err(Refusal::NoLock(with.method())),
+        };
         match cipher::open(kek.bytes(), &self.nonce, &self.aad(header), &self.wrapped) {
             Ok(file_key) => Ok(FileKey::copy_of(&file_key)),
             Err(Failed::Tag) => Err(Refusal::Unlock),
@@ -261,10 +368,19 @@ impl Lock {
         }
     }
 
+    /// Whether this lock can open the file on this machine, asked without showing anything: a
+    /// passphrase lock always can; a `touch-id` lock only on the Mac whose enclave holds its key,
+    /// while the fingers it was made under are still the ones enrolled.
+    pub(crate) fn opens_here(&self) -> bool {
+        self.params.opens_here()
+    }
+
     /// Append this lock's record to `image`: method, body length, body.
     pub(crate) fn write(&self, image: &mut Vec<u8>) {
         image.push(self.method().byte());
-        image.extend_from_slice(&self.method().body_len().to_be_bytes());
+        // In range: every method's longest body fits two bytes, asserted above.
+        let length = (self.params.len() + WRAP_LEN) as u16;
+        image.extend_from_slice(&length.to_be_bytes());
         self.head(image);
         image.extend_from_slice(&self.wrapped);
     }
@@ -279,7 +395,7 @@ impl Lock {
     /// and its body up to the wrapped file key. Any edit to the parameters, a cost included, fails
     /// the unwrap rather than producing a key.
     fn aad(&self, header: &[u8; HEADER_LEN]) -> Vec<u8> {
-        let mut aad = Vec::with_capacity(HEADER_LEN + 1 + self.method().params_len() + NONCE_LEN);
+        let mut aad = Vec::with_capacity(HEADER_LEN + 1 + self.params.len() + NONCE_LEN);
         aad.extend_from_slice(header);
         aad.push(self.method().byte());
         self.head(&mut aad);

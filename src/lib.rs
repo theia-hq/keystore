@@ -5,8 +5,11 @@
 //! own key or a root key, and is chosen by naming the file ([`KeyFile::device`], [`KeyFile::root`]);
 //! a sealed file of the other kind is refused, and a root key is never written plain. A file is plain,
 //! the raw 32-byte seed, or sealed: a random file key seals the seed, and a lock wraps that file key.
-//! The format holds a list of locks, at most one per [`Method`], and any one opens the file; the only
-//! method is `passphrase`, so a sealed file has one lock, and a root key always keeps it.
+//! The format holds a list of locks, at most one per [`Method`], and any one opens the file. The
+//! methods are `passphrase` and `touch-id`, a key in a Mac's Secure Enclave that opens with a touch.
+//! A `touch-id` lock opens only on the Mac that made it, so a root key always keeps its passphrase
+//! lock, the one that opens a copy of the file anywhere. A build for another platform reads and keeps
+//! a `touch-id` lock, and opens the file with its passphrase.
 //!
 //! The locks are a property of the FILE. They are read from the file's own bytes, never from
 //! configuration, and they change only when [`KeyFile::add_lock`] or [`KeyFile::remove_lock`]
@@ -37,14 +40,14 @@ mod stored;
 #[cfg(unix)]
 mod uid;
 
-pub use error::{CryptoError, Error, FormatError};
+pub use error::{CryptoError, EnclaveError, Error, FormatError, TouchIdError};
 pub use key_file::KeyFile;
 pub use kind::Kind;
 pub use method::{Method, NewLock, Protection, Unlock};
 pub use passphrase::{Passphrase, PassphraseError};
 pub use public_key::PublicKey;
 pub use secret::Secret;
-pub use stored::{Locked, Stored};
+pub use stored::{Health, Locked, Stored};
 
 #[cfg(test)]
 mod test_dir;

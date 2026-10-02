@@ -1,0 +1,19 @@
+[package]
+publish = false  # git-only for now, not published to crates.io
+name = "keystore-enclave"
+description = "A P-256 key in this Mac's Secure Enclave, kept as a blob in your own file, that agrees a secret behind Touch ID."
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+license = "MIT OR Apache-2.0"
+
+# Every dependency is macOS's own: the crate is empty on any other target, so it costs a non-Mac build
+# nothing.
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+security-framework-sys = "2.17"
+thiserror = "2"
+zeroize = "1"
+
+[lints]
+workspace = true

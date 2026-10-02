@@ -4,12 +4,13 @@ use zeroize::Zeroizing;
 
 use super::{KeyFile, Proof, lacks_hard_links};
 use crate::envelope::{AT_PUBLIC, Envelope, HEADER_LEN};
-use crate::error::{Error, FormatError};
+use crate::error::{Error, FormatError, TouchIdError};
 use crate::kind::Kind;
+use crate::lock::enclave::enclave_tests::{self as stand_in, Touch};
 use crate::method::{Method, NewLock, Protection, Unlock};
 use crate::passphrase::Passphrase;
 use crate::secret::Secret;
-use crate::stored::Stored;
+use crate::stored::{Health, Stored};
 use crate::test_dir::TestDir;
 
 /// The length of a sealed file with one passphrase lock.
@@ -898,4 +899,261 @@ fn a_filesystem_without_hard_links_is_told_apart_from_a_denied_permission() {
     assert!(lacks_hard_links(&errno(libc::ENOTSUP)));
     assert!(lacks_hard_links(&errno(libc::EPERM)));
     assert!(!lacks_hard_links(&errno(libc::EACCES)));
+}
+
+fn touch() -> Unlock<'static> {
+    Unlock::TouchId {
+        reason: "open the test key",
+    }
+}
+
+fn touch_lock() -> NewLock<'static> {
+    NewLock::TouchId {
+        reason: "check the new lock opens",
+    }
+}
+
+/// A sealed root key under `under`, with a `touch-id` lock added through it.
+fn root_with_touch_id(dir: &TestDir, under: &Passphrase) -> (KeyFile, Secret) {
+    let file = root_file(dir);
+    let secret = Secret::copy_of(&[4; 32]);
+    file.write(&secret, Protection::Passphrase(under)).unwrap();
+    file.add_lock(Some(with(under)), touch_lock()).unwrap();
+    (file, secret)
+}
+
+#[test]
+fn a_touch_id_lock_is_added_beside_the_passphrase_and_either_opens() {
+    let dir = TestDir::new();
+    let under = passphrase("correct horse battery staple");
+    let (file, secret) = sealed_file(&dir, [6; 32], &under);
+
+    file.add_lock(Some(with(&under)), touch_lock()).unwrap();
+    // Making the lock asked nothing; proving the rewritten file through it asked one touch.
+    assert_eq!(stand_in::touches(), 1);
+    let locked = locked(&file);
+    assert_eq!(
+        locked.methods().collect::<Vec<_>>(),
+        [Method::Passphrase, Method::TouchId]
+    );
+    for opener in [with(&under), touch()] {
+        assert_eq!(
+            locked.unlock(opener).unwrap().public_key(),
+            secret.public_key()
+        );
+    }
+    assert_eq!(dir.names(), ["identity.key"]);
+}
+
+#[test]
+fn a_touch_cannot_set_a_roots_passphrase() {
+    let dir = TestDir::new();
+    let under = passphrase("correct horse battery staple");
+    let (file, secret) = root_with_touch_id(&dir, &under);
+    let before = bytes(&file);
+    let asked = stand_in::touches();
+
+    let new = passphrase("a passphrase set by whoever holds the touch");
+    assert!(matches!(
+        file.add_lock(Some(touch()), lock(&new)),
+        Err(Error::RootPassphraseNeeded { .. })
+    ));
+    // Refused before anything is opened: no touch was even asked for.
+    assert_eq!(stand_in::touches(), asked);
+    assert_eq!(bytes(&file), before);
+
+    // Through its passphrase, the root's passphrase changes, and the touch still opens it.
+    file.add_lock(Some(with(&under)), lock(&new)).unwrap();
+    let locked = locked(&file);
+    assert_eq!(
+        locked.unlock(with(&new)).unwrap().public_key(),
+        secret.public_key()
+    );
+    assert!(locked.unlock(touch()).is_ok());
+    // And the touch may still change the touch.
+    file.add_lock(Some(touch()), touch_lock()).unwrap();
+}
+
+#[test]
+fn a_plain_root_is_never_sealed_under_a_touch_alone() {
+    let dir = TestDir::new();
+    let (device, _) = plain_file(&dir, [4; 32]);
+    let file = KeyFile::root(device.path());
+
+    assert!(matches!(
+        file.add_lock(None, touch_lock()),
+        Err(Error::RootPassphrase { .. })
+    ));
+    assert_eq!(bytes(&file), [4; 32]);
+    assert_eq!(stand_in::touches(), 0);
+}
+
+#[test]
+fn a_roots_touch_id_lock_comes_off_and_its_passphrase_stays() {
+    let dir = TestDir::new();
+    let under = passphrase("correct horse battery staple");
+    let (file, _) = root_with_touch_id(&dir, &under);
+
+    // The touch cannot take the passphrase off, any more than the passphrase can.
+    assert!(matches!(
+        file.remove_lock(touch(), Method::Passphrase),
+        Err(Error::RootPassphrase { .. })
+    ));
+    file.remove_lock(touch(), Method::TouchId).unwrap();
+    assert_eq!(
+        locked(&file).methods().collect::<Vec<_>>(),
+        [Method::Passphrase]
+    );
+}
+
+#[test]
+fn removing_the_passphrase_beside_another_macs_lock_is_refused() {
+    let dir = TestDir::new();
+    let under = passphrase("correct horse battery staple");
+    let (file, _) = sealed_file(&dir, [6; 32], &under);
+    file.add_lock(Some(with(&under)), touch_lock()).unwrap();
+    let before = bytes(&file);
+
+    // A copy of this file on another Mac: its touch-id lock is this Mac's, and opens nothing there.
+    stand_in::on_mac(2);
+    assert!(matches!(
+        file.remove_lock(with(&under), Method::Passphrase),
+        Err(Error::NoneOpensHere {
+            method: Method::Passphrase,
+            ..
+        })
+    ));
+    assert_eq!(bytes(&file), before);
+
+    // On the Mac that made the lock, the same removal goes through: the touch opens the file here.
+    stand_in::on_mac(1);
+    file.remove_lock(with(&under), Method::Passphrase).unwrap();
+    assert_eq!(
+        locked(&file).methods().collect::<Vec<_>>(),
+        [Method::TouchId]
+    );
+}
+
+#[test]
+fn removing_a_lock_ended_by_new_fingers_through_the_passphrase_goes_through() {
+    let dir = TestDir::new();
+    let under = passphrase("correct horse battery staple");
+    let (file, _) = sealed_file(&dir, [6; 32], &under);
+    file.add_lock(Some(with(&under)), touch_lock()).unwrap();
+
+    // The lock that stays is the one that opened the file, so it still opens here.
+    stand_in::touch(Touch::Ended);
+    file.remove_lock(with(&under), Method::TouchId).unwrap();
+    assert_eq!(
+        locked(&file).methods().collect::<Vec<_>>(),
+        [Method::Passphrase]
+    );
+}
+
+#[test]
+fn this_machines_key_moves_to_touch_id_alone_and_either_lock_opens_between() {
+    let dir = TestDir::new();
+    let under = passphrase("correct horse battery staple");
+    let (file, secret) = sealed_file(&dir, [6; 32], &under);
+
+    file.add_lock(Some(with(&under)), touch_lock()).unwrap();
+    // Between the two steps, which is where a crash leaves it, both locks open the file.
+    let between = locked(&file);
+    assert!(between.unlock(with(&under)).is_ok());
+    assert!(between.unlock(touch()).is_ok());
+
+    file.remove_lock(with(&under), Method::Passphrase).unwrap();
+    let locked = locked(&file);
+    assert_eq!(locked.methods().collect::<Vec<_>>(), [Method::TouchId]);
+    assert_eq!(
+        locked.unlock(touch()).unwrap().public_key(),
+        secret.public_key()
+    );
+    assert!(matches!(
+        locked.unlock(with(&under)),
+        Err(Error::NoLock {
+            method: Method::Passphrase,
+            ..
+        })
+    ));
+
+    // And its last lock comes off through the touch, which writes it plain.
+    file.remove_lock(touch(), Method::TouchId).unwrap();
+    assert_eq!(bytes(&file), [6; 32]);
+}
+
+#[test]
+fn a_plain_device_key_takes_a_touch_id_lock_as_its_one_lock() {
+    let dir = TestDir::new();
+    let (file, secret) = plain_file(&dir, [6; 32]);
+
+    file.add_lock(None, touch_lock()).unwrap();
+    let locked = locked(&file);
+    assert_eq!(locked.methods().collect::<Vec<_>>(), [Method::TouchId]);
+    assert_eq!(
+        locked.unlock(touch()).unwrap().public_key(),
+        secret.public_key()
+    );
+}
+
+#[test]
+fn one_context_opens_one_key() {
+    let dir = TestDir::new();
+    let under = passphrase("correct horse battery staple");
+    let (device, _) = sealed_file(&dir, [6; 32], &under);
+    device.add_lock(Some(with(&under)), touch_lock()).unwrap();
+    let (root, _) = root_with_touch_id(&dir, &under);
+    let (device, root) = (locked(&device), locked(&root));
+    let asked = stand_in::touches();
+
+    // Each open asks for its own touch: none is kept for the next open, or lent to the other key.
+    device.unlock(touch()).unwrap();
+    assert_eq!(stand_in::touches(), asked + 1);
+    root.unlock(touch()).unwrap();
+    assert_eq!(stand_in::touches(), asked + 2);
+    device.unlock(touch()).unwrap();
+    assert_eq!(stand_in::touches(), asked + 3);
+}
+
+#[test]
+fn a_dead_touch_id_lock_is_told_without_a_touch() {
+    let dir = TestDir::new();
+    let under = passphrase("correct horse battery staple");
+    let (file, _) = sealed_file(&dir, [6; 32], &under);
+    assert_eq!(locked(&file).health(Method::TouchId), None);
+    file.add_lock(Some(with(&under)), touch_lock()).unwrap();
+    let locked = locked(&file);
+    let asked = stand_in::touches();
+
+    assert_eq!(locked.health(Method::Passphrase), Some(Health::Live));
+    assert_eq!(locked.health(Method::TouchId), Some(Health::Live));
+    // Another Mac's lock, and one ended by a change to the enrolled fingers, read as dead.
+    stand_in::on_mac(2);
+    assert_eq!(locked.health(Method::TouchId), Some(Health::Dead));
+    stand_in::on_mac(1);
+    stand_in::touch(Touch::Ended);
+    assert_eq!(locked.health(Method::TouchId), Some(Health::Dead));
+    // A passphrase lock is live wherever the passphrase is typed.
+    assert_eq!(locked.health(Method::Passphrase), Some(Health::Live));
+    assert_eq!(stand_in::touches(), asked);
+}
+
+#[test]
+fn a_cancelled_touch_leaves_the_file_as_it_was() {
+    let dir = TestDir::new();
+    let under = passphrase("correct horse battery staple");
+    let (file, _) = sealed_file(&dir, [6; 32], &under);
+    let before = bytes(&file);
+
+    // The touch that proves the new lock is cancelled: the new form is never published.
+    stand_in::touch(Touch::Cancelled);
+    assert!(matches!(
+        file.add_lock(Some(with(&under)), touch_lock()),
+        Err(Error::TouchId {
+            source: TouchIdError::Declined(_),
+            ..
+        })
+    ));
+    assert_eq!(bytes(&file), before);
+    assert_eq!(dir.names(), ["identity.key"]);
 }

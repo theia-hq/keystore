@@ -10,6 +10,7 @@ license = "MIT OR Apache-2.0"
 # The root package is the storage core, and the workspace is where a platform crate it calls lands
 # beside it, sharing these lints.
 [workspace]
+members = ["keystore-enclave"]
 resolver = "3"
 
 [dependencies]
@@ -23,8 +24,22 @@ icu_normalizer = { version = "2.1", default-features = false, features = ["compi
 thiserror = "2"
 zeroize = "1"
 
+# The `touch-id` lock opens only on a Mac. Elsewhere a build parses and names the lock and leaves it
+# alone, so none of this is compiled there.
+[target.'cfg(target_os = "macos")'.dependencies]
+hkdf = "0.12"
+keystore-enclave = { path = "keystore-enclave" }
+p256 = { version = "0.13", default-features = false, features = ["ecdh"] }
+sha2 = { version = "0.10", default-features = false }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# The software stand-in for the enclave, which runs the `touch-id` lock's every byte on any machine.
+[dev-dependencies]
+hkdf = "0.12"
+p256 = { version = "0.13", default-features = false, features = ["ecdh"] }
+sha2 = { version = "0.10", default-features = false }
 
 [lints]
 workspace = true
