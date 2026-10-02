@@ -236,7 +236,16 @@ mod probe {
             .source()
             .and_then(|source| source.downcast_ref::<OsError>())
         {
-            Some(os) => format!("{name} ({} {})", os.domain(), os.code()),
+            Some(os) => format!(
+                "{name} ({} {}, description held a hash or key id: {})",
+                os.domain(),
+                os.code(),
+                if os.description_withheld() {
+                    "yes"
+                } else {
+                    "no"
+                }
+            ),
             None => name.to_owned(),
         }
     }

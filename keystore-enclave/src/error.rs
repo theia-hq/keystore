@@ -56,15 +56,24 @@ pub enum Error {
     NoContext,
 }
 
-/// An error the system returned, as it said it: its domain, its code, and its description.
+/// An error the system returned: its domain, its code, and its localized description.
 ///
-/// Copied out of the `CFError` the call returned, so it can cross threads and outlive the call.
+/// Copied out of the `CFError` the call returned, so it can cross threads and outlive the call. Only
+/// those three are taken: never the error's `userInfo` and never a debug description, where
+/// LocalAuthentication keeps the enrolled fingers' hash (`BiometryDatabaseHash`) and CryptoTokenKit a
+/// key's id. A description that names that hash, or holds a run of 16 or more hex digits (a key id or
+/// a hash), is dropped as well, so only the domain and the code are kept, and nothing printed from an
+/// `OsError` can carry either.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct OsError {
     domain: String,
     code: isize,
-    description: String,
+    description: Option<String>,
 }
+
+/// The shortest run of hex digits read as a hash or a key id rather than as words. CryptoTokenKit's
+/// key ids are 16.
+const HEX_RUN: usize = 16;
 
 impl OsError {
     /// The error's domain: `com.apple.LocalAuthentication`, `CryptoTokenKit`, `NSOSStatusErrorDomain`.
@@ -77,23 +86,34 @@ impl OsError {
         self.code
     }
 
+    /// Whether the system's description was dropped because it held a hash or a key id.
+    pub const fn description_withheld(&self) -> bool {
+        self.description.is_none()
+    }
+
     /// Take the `CFError` a call wrote to its out-parameter, releasing it. A call that failed without
     /// writing one still fails: it reads as an unknown error rather than a success.
     pub(crate) fn take(error: CFErrorRef) -> Self {
         if error.is_null() {
-            return Self {
-                domain: String::from("unknown"),
-                code: 0,
-                description: String::from("the call failed and gave no reason"),
-            };
+            return Self::new("unknown", 0, "the call failed and gave no reason");
         }
         // SAFETY: a non-null `CFErrorRef` written to a Security.framework out-parameter is a +1
         // reference this function now owns; wrapping it under the create rule releases it once.
         let error = unsafe { CFError::wrap_under_create_rule(error) };
+        // `description` is the localized description, never the `userInfo` it was built beside.
+        Self::new(
+            &error.domain().to_string(),
+            error.code(),
+            &error.description().to_string(),
+        )
+    }
+
+    /// An error from its parts, the description kept only if it carries no hash or key id.
+    pub(crate) fn new(domain: &str, code: isize, description: &str) -> Self {
         Self {
-            domain: error.domain().to_string(),
-            code: error.code(),
-            description: error.description().to_string(),
+            domain: domain.to_owned(),
+            code,
+            description: (!carries_a_secret_shape(description)).then(|| description.to_owned()),
         }
     }
 
@@ -110,8 +130,32 @@ impl OsError {
 
 impl fmt::Display for OsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} {}: {}", self.domain, self.code, self.description)
+        write!(f, "{} {}", self.domain, self.code)?;
+        match &self.description {
+            Some(description) => write!(f, ": {description}"),
+            None => Ok(()),
+        }
     }
 }
 
 impl core::error::Error for OsError {}
+
+/// Whether `description` names the enrolled fingers' hash or holds a run of hex long enough to be a
+/// hash or a key id.
+fn carries_a_secret_shape(description: &str) -> bool {
+    if description.contains("BiometryDatabaseHash") {
+        return true;
+    }
+    let mut run = 0;
+    for c in description.chars() {
+        run = if c.is_ascii_hexdigit() { run + 1 } else { 0 };
+        if run >= HEX_RUN {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+#[path = "error_tests.rs"]
+mod error_tests;
