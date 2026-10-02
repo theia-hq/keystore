@@ -18,8 +18,8 @@ pub enum Method {
     /// that.
     Passphrase,
     /// A touch on this Mac: a key in its Secure Enclave, kept as a blob in the lock, agrees a secret
-    /// with a one-time key after a touch of a finger enrolled when the lock was made, and the file key is wrapped under a
-    /// key derived from that.
+    /// with a one-time key after a touch of a finger enrolled when the lock was made, and the file key
+    /// is wrapped under a key derived from that.
     TouchId,
 }
 

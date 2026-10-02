@@ -1,6 +1,7 @@
 //! A probe of what the Secure Enclave answers, with no dialog allowed, for a `touch-id` key as the
 //! Mac around it changes: a locked screen, a closed lid, a lockout after failed touches, a finger
-//! enrolled or removed. It decides how `Locked::health` reads those states.
+//! enrolled or removed. Rerun it on each major macOS release to check that `Locked::health` still reads
+//! these states as documented.
 //!
 //! ```text
 //! cargo run --example touch_id_probe -- sampler

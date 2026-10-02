@@ -58,11 +58,11 @@ impl Locked {
     /// A passphrase lock is always [`Health::Live`]: whether the passphrase is right is known only by
     /// trying it. A `touch-id` lock is asked of the enclave with no dialog allowed. It is
     /// [`Health::Live`] when the enclave refuses only for want of a touch, and [`Health::Dead`] when the
-    /// enclave refuses the key itself: another Mac's lock, a damaged one, or one made under other
-    /// enrolled fingers than the ones enrolled now. A lock that stops opening when a finger is enrolled
-    /// opens again when that finger is removed, so dead is a reading of now. Every `touch-id` lock is
-    /// dead on a build with no enclave. Any other answer (a locked screen, a lockout, a busy enclave, a
-    /// code not named) is [`Health::Unchecked`], never dead.
+    /// enclave refuses the key itself: another Mac's lock, a damaged one, or one made under a different
+    /// set of enrolled fingers. A lock that stops opening when a finger is enrolled opens again when that
+    /// finger is removed, so `Dead` describes now, not for good. Every `touch-id` lock is dead on a build
+    /// with no enclave. Any other answer (a locked screen, a lockout, a busy enclave, any other error)
+    /// is [`Health::Unchecked`], never dead.
     ///
     /// A lock someone else put on the file, for a key they made in this Mac's enclave, reads as live:
     /// telling it from your own takes the touch, because only the unwrap shows whose file key it holds.

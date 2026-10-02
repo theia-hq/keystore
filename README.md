@@ -1,9 +1,9 @@
 # keystore
 
 keystore stores one ed25519 secret key (its 32-byte seed) in one file, plain or sealed. Sealed, a random
-file key encrypts the seed with XChaCha20-Poly1305, and each lock on the file wraps that file key: a
-passphrase, stretched with Argon2id, or `touch-id`, a key in a Mac's Secure Enclave that opens the file
-with a touch. Any one lock opens the file.
+file key encrypts the seed with XChaCha20-Poly1305, and each lock on the file wraps that file key. A lock
+is a passphrase, stretched with Argon2id, or `touch-id`, a key in a Mac's Secure Enclave that opens the
+file with a touch. Any one lock opens the file.
 
 - **The public key, readable while locked.** A sealed file names its public key, so you can show
   which key it holds before asking for a passphrase. Unlocking checks that name against the seed and
@@ -61,6 +61,9 @@ on its own.
 [`examples/touch_id.rs`](examples/touch_id.rs) puts a `touch-id` lock on a new key file and opens it with
 a touch: `cargo run --example touch_id -- <path>`.
 
+[`examples/touch_id_probe.rs`](examples/touch_id_probe.rs) prints what the Secure Enclave answers, with
+no dialog, as the screen locks, Touch ID locks out, or a finger is added or removed.
+
 ## Platforms
 
 Tested on Linux and macOS. On Unix, a key file must be owned by you (or root) and open to no one
@@ -68,8 +71,9 @@ else, or loading it fails with `Error::Owner` or `Error::Permissive`; `chmod 600
 Files keystore writes are owner-only already. Other platforms have no owner or mode check.
 
 A `touch-id` lock opens only on the Mac that made it, and only while the same fingers are enrolled.
-Every other build reads and keeps the lock and opens the file with another one. So a root key always
-keeps its passphrase lock.
+Anywhere else, keystore reads and keeps the lock and opens the file with another one. So a root key
+always keeps its passphrase lock. When two files have `touch-id` locks made on one Mac with the same
+fingers, anyone who holds both can see that.
 
 ## Format
 

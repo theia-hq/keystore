@@ -12,7 +12,8 @@ use p256::elliptic_curve::sec1::ToEncodedPoint as _;
 use zeroize::Zeroizing;
 
 use super::{
-    Agree, Blob, Enclave, EnclaveParams, POINT_LEN, Point, Policy, Refused, SECRET_LEN, Shape,
+    Agree, Blob, Enclave, EnclaveParams, LOCAL_AUTHENTICATION_DOMAIN, NEEDS_A_PERSON, POINT_LEN,
+    Point, Policy, Raised, Refused, SECRET_LEN, STATUS_DOMAIN, Shape, TOKEN_DOMAIN, shape_of,
 };
 use crate::error::{EnclaveError, FormatError, TouchIdError};
 use crate::stored::Health;
@@ -82,9 +83,6 @@ fn refused(shape: Shape) -> Refused {
     }
 }
 
-/// LocalAuthentication's "a person is needed, and none may be asked".
-const NEEDS_A_PERSON: isize = -1004;
-
 pub(crate) fn point_of(key: &p256::SecretKey) -> Point {
     let mut bytes = [0; POINT_LEN];
     bytes.copy_from_slice(key.public_key().to_encoded_point(false).as_bytes());
@@ -114,14 +112,15 @@ impl Enclave for StandIn {
         if TOUCH.get() == Touch::Unrecognised {
             return Err(refused(Shape::Other));
         }
-        // Another Mac's blob, or a damaged one, does not reload here.
+        // Another Mac's blob, or a damaged one, is refused by the enclave's token, as on hardware.
+        let token = || refused(Shape::Token(-3));
         let Some((&mac, scalar)) = blob.bytes().split_first() else {
-            return Err(refused(Shape::NotLoaded));
+            return Err(token());
         };
         if mac != MAC.get() {
-            return Err(refused(Shape::NotLoaded));
+            return Err(token());
         }
-        let key = p256::SecretKey::from_slice(scalar).map_err(|_| refused(Shape::NotLoaded))?;
+        let key = p256::SecretKey::from_slice(scalar).map_err(|_| token())?;
         if point_of(&key) != *public {
             return Err(refused(Shape::NotLoaded));
         }
@@ -272,6 +271,35 @@ fn another_macs_lock_does_not_load_here_and_asks_for_no_touch() {
         Err(crate::error::MethodError::TouchId(TouchIdError::NotHere(_)))
     ));
     assert_eq!(touches(), 0);
+}
+
+/// The founder's probe rows (`lab/86/probe-founder-2026-10-02/`), each through the one function that
+/// reads what the real enclave raises.
+#[test]
+fn each_probe_row_reads_as_ruled() {
+    for (raised, health) in [
+        (
+            Raised::System(LOCAL_AUTHENTICATION_DOMAIN, NEEDS_A_PERSON),
+            Health::Live,
+        ),
+        (Raised::System(TOKEN_DOMAIN, -3), Health::Dead),
+        (
+            Raised::System(LOCAL_AUTHENTICATION_DOMAIN, -4),
+            Health::Unchecked,
+        ),
+        (
+            Raised::System(LOCAL_AUTHENTICATION_DOMAIN, -8),
+            Health::Unchecked,
+        ),
+        (Raised::System(STATUS_DOMAIN, -25308), Health::Unchecked),
+        (Raised::OtherKey, Health::Dead),
+        // A domain or a refusal not named: cannot check now, never dead.
+        (Raised::System("NSCocoaErrorDomain", -3), Health::Unchecked),
+        (Raised::System("unknown", 0), Health::Unchecked),
+        (Raised::Unnamed, Health::Unchecked),
+    ] {
+        assert_eq!(shape_of(raised).health(), health, "{raised:?}");
+    }
 }
 
 #[test]

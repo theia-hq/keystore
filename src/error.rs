@@ -432,11 +432,11 @@ pub enum TouchIdError {
     #[error("a touch-id lock opens only on macOS")]
     Unavailable,
     /// The lock's key does not open in this Mac's enclave with the fingers enrolled now: a lock made on
-    /// another Mac, one made under other enrolled fingers (it opens again if they change back), or a
-    /// damaged one. Told apart from a cancel even when the enclave turns the key down after the
+    /// another Mac, one made before a finger was added or removed (if a finger was added, the lock opens
+    /// again once it is removed), or a damaged one. Told apart from a cancel even when the enclave turns the key down after the
     /// dialog.
     #[error(
-        "this Mac's Secure Enclave does not hold the lock's key: it was made on another Mac, or before the enrolled fingers changed"
+        "the lock does not open on this Mac now; if a fingerprint was added after the lock was made, remove it and the lock opens again"
     )]
     NotHere(#[source] EnclaveError),
     /// The person cancelled, or the touch did not match.

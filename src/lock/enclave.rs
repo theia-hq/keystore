@@ -236,7 +236,7 @@ const DECLINED: [isize; 4] = [-1, -2, -4, -9];
 #[cfg(any(test, target_os = "macos"))]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Shape {
-    /// The blob does not reload here, or reloads as another key than the lock names.
+    /// The blob reloads as another key than the lock names.
     NotLoaded,
     /// CryptoTokenKit, the enclave's token, refused the key itself, with this code: a damaged blob,
     /// another Mac's, or a key made under other enrolled fingers than the ones enrolled now.
@@ -256,9 +256,49 @@ impl Shape {
     /// any code not named here read as not checkable now, never as dead.
     const fn health(self) -> Health {
         match self {
+            // The one refusal a silent check is built to get: the key is here, and needs a touch.
+            Self::LocalAuthentication(NEEDS_A_PERSON) => Health::Live,
             Self::NotLoaded | Self::Token(_) => Health::Dead,
             Self::LocalAuthentication(_) | Self::Status(_) | Self::Other => Health::Unchecked,
         }
+    }
+}
+
+/// LocalAuthentication's "a person is needed, and none may be asked": what a silent check of a key
+/// that is here and guarded answers.
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) const NEEDS_A_PERSON: isize = -1004;
+
+/// The domains a refusal is read by, matched whole.
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) const TOKEN_DOMAIN: &str = "CryptoTokenKit";
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) const LOCAL_AUTHENTICATION_DOMAIN: &str = "com.apple.LocalAuthentication";
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) const STATUS_DOMAIN: &str = "NSOSStatusErrorDomain";
+
+/// What the enclave raised, reduced to what a refusal is read by.
+#[cfg(any(test, target_os = "macos"))]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Raised<'a> {
+    /// The blob reloaded as another key than the one expected.
+    OtherKey,
+    /// The system refused, in this domain, with this code.
+    System(&'a str, isize),
+    /// A refusal with no system code.
+    Unnamed,
+}
+
+/// The shape of what the enclave raised: the one place a domain and code become a reading. Pure, so
+/// every row of it is tested on any machine.
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) fn shape_of(raised: Raised<'_>) -> Shape {
+    match raised {
+        Raised::OtherKey => Shape::NotLoaded,
+        Raised::System(TOKEN_DOMAIN, code) => Shape::Token(code),
+        Raised::System(LOCAL_AUTHENTICATION_DOMAIN, code) => Shape::LocalAuthentication(code),
+        Raised::System(STATUS_DOMAIN, code) => Shape::Status(code),
+        Raised::System(_, _) | Raised::Unnamed => Shape::Other,
     }
 }
 
@@ -453,19 +493,16 @@ impl Agree for keystore_enclave::Key {
 fn refused(error: keystore_enclave::Error) -> Refused {
     use keystore_enclave::Error;
 
-    let shape = match &error {
-        Error::OtherKey => Shape::NotLoaded,
-        Error::Load(os) if !os.domain().contains("CryptoTokenKit") => Shape::NotLoaded,
+    // A reload that fails outside CryptoTokenKit is read by its domain like any other refusal, so
+    // only the token's own refusal, or another key, reads as dead. `Unguarded` (a key that agreed
+    // with nobody asked) cannot come from a lock this crate made, and stays unnamed.
+    let shape = shape_of(match &error {
+        Error::OtherKey => Raised::OtherKey,
         Error::Load(os) | Error::Declined(os) | Error::NotInteractive(os) | Error::Agree(os) => {
-            match os.domain() {
-                "CryptoTokenKit" => Shape::Token(os.code()),
-                "com.apple.LocalAuthentication" => Shape::LocalAuthentication(os.code()),
-                "NSOSStatusErrorDomain" => Shape::Status(os.code()),
-                _ => Shape::Other,
-            }
+            Raised::System(os.domain(), os.code())
         }
-        _ => Shape::Other,
-    };
+        _ => Raised::Unnamed,
+    });
     Refused {
         shape,
         source: crate::error::EnclaveError::new(error),

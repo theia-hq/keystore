@@ -11,16 +11,19 @@ keystore-enclave = { git = "https://github.com/theia-hq/keystore" }
 ```
 
 ```rust
-use keystore_enclave::{Policy, create, load};
+use keystore_enclave::{Error, Policy, create, load};
 
-let (blob, public) = create(Policy::BiometryCurrentSet)?; // keep both in your own file
-let key = load(&blob, &public)?;
-key.check()?; // this Mac's key, still guarded; no dialog
-let secret = key.agree(&peer, "open your key")?; // asks for a touch
+fn open(peer: &[u8; 65]) -> Result<(), Error> {
+    let (blob, public) = create(Policy::BiometryCurrentSet)?; // keep both in your own file
+    let key = load(&blob, &public)?;
+    key.check()?; // opens on this Mac and still asks for a touch; no dialog
+    let secret = key.agree(peer, "open your key")?; // asks for a touch
+    Ok(())
+}
 ```
 
-Adding or removing a finger stops the key opening until the fingers change back; keep another way in
-to whatever it guards.
+After a finger is added or removed, the key does not open; it opens again once a finger you added
+is removed. Keep another way in to whatever it guards.
 
 ## License
 

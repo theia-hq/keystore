@@ -1,7 +1,7 @@
 [package]
 publish = false  # git-only for now, not published to crates.io
 name = "keystore-enclave"
-description = "A P-256 key in a Mac's Secure Enclave, kept as a blob in your own file, that does ECDH only after a touch of an enrolled finger."
+description = "A Secure Enclave P-256 key, stored as a blob you keep, that does ECDH after a touch"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.91"

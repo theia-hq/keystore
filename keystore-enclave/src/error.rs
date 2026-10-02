@@ -20,8 +20,8 @@ pub enum Error {
     #[error("the new enclave key has no blob to keep")]
     NoBlob,
     /// The blob does not load, or loads and cannot be used, in this Mac's enclave: a blob made on
-    /// another Mac, or a damaged one. The two cannot be told apart: the enclave refuses both the
-    /// same way.
+    /// another Mac, a damaged one, or a key made before a finger was added. They cannot be told apart:
+    /// the enclave refuses them all the same way.
     #[error("the key blob does not open in this Mac's Secure Enclave")]
     Load(#[source] OsError),
     /// The blob holds a different key than the public key it was loaded against.
@@ -141,14 +141,25 @@ impl fmt::Display for OsError {
 impl core::error::Error for OsError {}
 
 /// Whether `description` names the enrolled fingers' hash or holds a run of hex long enough to be a
-/// hash or a key id.
+/// hash or a key id, spaced in groups or not.
 fn carries_a_secret_shape(description: &str) -> bool {
     if description.contains("BiometryDatabaseHash") {
         return true;
     }
+    // A single space inside a run continues it, so Core Foundation's printed bytes
+    // (`0x506ba565 fd1e8752 ...`, in groups of eight) count as one run.
     let mut run = 0;
+    let mut after_hex = false;
     for c in description.chars() {
-        run = if c.is_ascii_hexdigit() { run + 1 } else { 0 };
+        if c.is_ascii_hexdigit() {
+            run += 1;
+            after_hex = true;
+        } else if c == ' ' && after_hex {
+            after_hex = false;
+        } else {
+            run = 0;
+            after_hex = false;
+        }
         if run >= HEX_RUN {
             return true;
         }

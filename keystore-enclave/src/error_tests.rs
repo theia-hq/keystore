@@ -7,6 +7,8 @@ fn a_description_carrying_a_hash_or_a_key_id_is_dropped_and_the_code_kept() {
         "User interaction is required. BiometryDatabaseHash={length = 32, bytes = 0x506ba565}",
         // A 32-byte hash as hex.
         "state 506ba565fd1e8752fd9ae867720476d6b0396e4ffa33d063506ba565fd1e8752",
+        // Core Foundation's printed bytes, in groups of eight.
+        "state bytes = 0x506ba565 fd1e8752 fd9ae867 720476d6",
         // CryptoTokenKit's key id, as round 1 saw it.
         "<sepk:p256(u) kid=2a6a915ff06fc561>: unable to compute shared secret",
     ] {

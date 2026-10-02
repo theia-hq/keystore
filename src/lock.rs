@@ -10,8 +10,8 @@
 //! | 24  | XChaCha20-Poly1305 nonce                                               |
 //! | 48  | the file key, encrypted under the method's key, then its Poly1305 tag  |
 //!
-//! The method byte is `1` for a passphrase lock and `2` for a `touch-id` lock; any other is refused by
-//! name.
+//! The method byte is `1` for a passphrase lock and `2` for a `touch-id` lock; any other is refused
+//! (`FormatError::Method`).
 //!
 //! Each method bounds its body's length, so a length is judged against the method before a byte of
 //! the body is read. A passphrase lock's parameters have one length; a `touch-id` lock's hold a blob

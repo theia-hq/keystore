@@ -35,7 +35,9 @@ fn main() -> Result<(), Box<dyn core::error::Error>> {
         let here = match locked.health(method) {
             Some(Health::Live) => "can open on this Mac",
             Some(Health::Unchecked) => "could not be checked now",
-            Some(Health::Dead) | None => "cannot open on this Mac",
+            Some(Health::Dead) | None => {
+                "does not open on this Mac now (if you added a fingerprint, remove it and the lock opens again)"
+            }
         };
         println!("{method} lock: {here}");
     }
