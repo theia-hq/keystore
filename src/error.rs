@@ -65,10 +65,15 @@ pub enum Error {
     /// A lock did not open, or the seed did not open under the key it gave. A wrong passphrase and
     /// damaged contents are deliberately this one variant: the cipher cannot tell them apart, and a
     /// refusal that guessed would be an oracle.
-    #[error("could not unlock the key file {}: wrong passphrase, or the file is damaged", path.display())]
+    ///
+    /// A `touch-id` lock refuses this way only after its touch: the file's contents are checked by
+    /// the cipher, and the cipher needs the key the touch gives, so no damage can be found before it.
+    #[error("could not unlock the key file {}: {}", path.display(), unlock_cause(*method))]
     Unlock {
         /// The key file.
         path: PathBuf,
+        /// The method of the lock that was tried.
+        method: Method,
     },
     /// A sealed file unlocked, but its header names a different public key than the seed it seals.
     #[error("the key file {} seals a different key than its header names", path.display())]
@@ -120,7 +125,7 @@ pub enum Error {
     /// A lock change would leave a root key with no lock that opens on another machine: removing its
     /// passphrase lock, or sealing a plain root under a lock that opens on this machine alone. A root
     /// key always keeps one, because it is how a copy of the file opens anywhere else.
-    #[error("a root key always keeps its passphrase lock; {} was not changed", path.display())]
+    #[error("a root key always has a passphrase lock; {} was not changed", path.display())]
     RootPassphrase {
         /// The key file.
         path: PathBuf,
@@ -129,7 +134,7 @@ pub enum Error {
     /// that opens on this machine alone. Whoever holds only that lock must not be able to set a
     /// passphrase that opens every copy of the root.
     #[error(
-        "a root key's passphrase is set only with its passphrase; {} was not changed",
+        "a root key's passphrase changes only when the file is opened with it; {} was not changed",
         path.display()
     )]
     RootPassphraseNeeded {
@@ -235,6 +240,15 @@ pub enum Error {
     },
 }
 
+/// What a failed unlock through a lock of `method` can mean. A touch that agreed has no wrong input to
+/// blame, so only the passphrase names one.
+const fn unlock_cause(method: Method) -> &'static str {
+    match method {
+        Method::Passphrase => "wrong passphrase, or the file is damaged",
+        Method::TouchId => "the file is damaged",
+    }
+}
+
 /// Why a key file's bytes did not parse. Raised by the one parser, before any key is derived, so
 /// nothing here depends on a passphrase and nothing here reveals anything about one.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -309,13 +323,13 @@ pub enum FormatError {
     },
     /// A `touch-id` lock whose blob length does not account for its parameters: no blob, one past
     /// the cap, or one that leaves the one-time key the wrong size.
-    #[error("a touch-id lock's blob of {found} bytes does not fit its lock")]
+    #[error("a touch-id lock declares a {found}-byte blob that does not fit it")]
     Blob {
         /// The blob length the lock declares.
         found: u16,
     },
     /// A `touch-id` lock's public key is not an uncompressed P-256 point.
-    #[error("a touch-id lock holds a public key that is not an uncompressed point")]
+    #[error("a touch-id lock holds a public key that is not an uncompressed P-256 point")]
     Point,
     /// A key derivation function this build does not know.
     #[error("key derivation function {found} is not one this build knows")]
@@ -415,17 +429,19 @@ impl CryptoError {
 #[non_exhaustive]
 pub enum TouchIdError {
     /// This build has no Secure Enclave to ask: it is not a macOS build.
-    #[error("this build has no secure enclave")]
+    #[error("a touch-id lock opens only on macOS")]
     Unavailable,
     /// This Mac's enclave does not hold the lock's key: a lock made on another Mac, one ended by a
     /// change to the enrolled fingers, or a damaged one.
-    #[error("this machine's secure enclave does not hold the lock's key")]
+    #[error(
+        "this Mac's Secure Enclave does not hold the lock's key: it was made on another Mac, or before the enrolled fingers changed"
+    )]
     NotHere(#[source] EnclaveError),
     /// The person cancelled, or the touch did not match.
     #[error("the touch was cancelled or did not match")]
     Declined(#[source] EnclaveError),
     /// The enclave could not make the key or agree the secret.
-    #[error("the secure enclave failed")]
+    #[error("the Secure Enclave failed")]
     Enclave(#[source] EnclaveError),
 }
 
@@ -447,10 +463,10 @@ impl EnclaveError {
 #[cfg(any(test, target_os = "macos"))]
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Unusable {
-    #[error("the secure enclave's public key is not a P-256 point")]
+    #[error("the Secure Enclave's public key is not a P-256 point")]
     Point,
     #[cfg(target_os = "macos")]
-    #[error("the secure enclave's key blob is {found} bytes, outside what a lock holds")]
+    #[error("the Secure Enclave's key blob is {found} bytes, outside what a lock holds")]
     BlobLength { found: usize },
 }
 

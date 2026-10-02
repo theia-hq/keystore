@@ -10,6 +10,9 @@
 //! | 24  | XChaCha20-Poly1305 nonce                                               |
 //! | 48  | the file key, encrypted under the method's key, then its Poly1305 tag  |
 //!
+//! The method byte is `1` for a passphrase lock and `2` for a `touch-id` lock; any other is refused by
+//! name.
+//!
 //! Each method bounds its body's length, so a length is judged against the method before a byte of
 //! the body is read. A passphrase lock's parameters have one length; a `touch-id` lock's hold a blob
 //! the enclave sizes, up to a cap, and say its length themselves.
@@ -37,6 +40,7 @@ use crate::error::{CryptoError, FormatError, MethodError};
 use crate::lock::enclave::EnclaveParams;
 use crate::lock::passphrase::PassphraseParams;
 use crate::method::{Method, NewLock, Unlock};
+use crate::stored::Health;
 
 /// Method byte: a passphrase lock.
 const METHOD_PASSPHRASE: u8 = 1;
@@ -196,11 +200,11 @@ impl Params {
     }
 
     /// Whether these parameters can make their key on this machine, asked without showing anything.
-    fn opens_here(&self) -> bool {
+    fn health(&self) -> Health {
         match self {
             // A passphrase lock opens anywhere the passphrase is typed.
-            Self::Passphrase(_) => true,
-            Self::TouchId(params) => this_machine::opens_here(params),
+            Self::Passphrase(_) => Health::Live,
+            Self::TouchId(params) => this_machine::health(params),
         }
     }
 
@@ -235,6 +239,7 @@ mod this_machine {
     use crate::error::TouchIdError;
     use crate::lock::Kek;
     use crate::lock::enclave::EnclaveParams;
+    use crate::stored::Health;
 
     #[cfg(test)]
     fn enclave() -> crate::lock::enclave::enclave_tests::StandIn {
@@ -257,8 +262,8 @@ mod this_machine {
     }
 
     #[cfg(any(test, target_os = "macos"))]
-    pub(super) fn opens_here(params: &EnclaveParams) -> bool {
-        params.opens_here(&enclave())
+    pub(super) fn health(params: &EnclaveParams) -> Health {
+        params.health(&enclave())
     }
 
     #[cfg(not(any(test, target_os = "macos")))]
@@ -271,9 +276,10 @@ mod this_machine {
         Err(TouchIdError::Unavailable.into())
     }
 
+    /// With no enclave in the build, a `touch-id` lock never opens here.
     #[cfg(not(any(test, target_os = "macos")))]
-    pub(super) const fn opens_here(_: &EnclaveParams) -> bool {
-        false
+    pub(super) const fn health(_: &EnclaveParams) -> Health {
+        Health::Dead
     }
 }
 
@@ -363,7 +369,7 @@ impl Lock {
         };
         match cipher::open(kek.bytes(), &self.nonce, &self.aad(header), &self.wrapped) {
             Ok(file_key) => Ok(FileKey::copy_of(&file_key)),
-            Err(Failed::Tag) => Err(Refusal::Unlock),
+            Err(Failed::Tag) => Err(Refusal::Unlock(self.method())),
             Err(Failed::Crypto(source)) => Err(Refusal::Crypto(source)),
         }
     }
@@ -371,8 +377,8 @@ impl Lock {
     /// Whether this lock can open the file on this machine, asked without showing anything: a
     /// passphrase lock always can; a `touch-id` lock only on the Mac whose enclave holds its key,
     /// while the fingers it was made under are still the ones enrolled.
-    pub(crate) fn opens_here(&self) -> bool {
-        self.params.opens_here()
+    pub(crate) fn health(&self) -> Health {
+        self.params.health()
     }
 
     /// Append this lock's record to `image`: method, body length, body.

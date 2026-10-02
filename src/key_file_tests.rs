@@ -1096,6 +1096,10 @@ fn a_plain_device_key_takes_a_touch_id_lock_as_its_one_lock() {
     );
 }
 
+/// Each open asks for its own touch: the core calls the enclave once per unlock and keeps nothing
+/// for the next open or the other key. The stand-in has no context, so this cannot see a reused one;
+/// the context half of "one touch opens one key" is pinned by `keystore-enclave`'s
+/// `a_context_is_made_for_each_operation_and_never_kept` and its touched hardware test.
 #[test]
 fn one_context_opens_one_key() {
     let dir = TestDir::new();
@@ -1156,4 +1160,101 @@ fn a_cancelled_touch_leaves_the_file_as_it_was() {
     ));
     assert_eq!(bytes(&file), before);
     assert_eq!(dir.names(), ["identity.key"]);
+}
+
+#[test]
+fn a_new_key_is_written_sealed_under_touch_id_and_never_plain() {
+    let dir = TestDir::new();
+    let file = key_file(&dir);
+    let secret = Secret::copy_of(&[6; 32]);
+
+    file.write(&secret, Protection::TouchId { reason: "write it" })
+        .unwrap();
+    // The proof of the staged file asked one touch; the file holds the touch-id lock alone.
+    assert_eq!(stand_in::touches(), 1);
+    let locked = locked(&file);
+    assert_eq!(locked.methods().collect::<Vec<_>>(), [Method::TouchId]);
+    assert_eq!(
+        locked.unlock(touch()).unwrap().public_key(),
+        secret.public_key()
+    );
+    assert!(bytes(&file).starts_with(b"KEYSTORE"));
+    assert_eq!(dir.names(), ["identity.key"]);
+
+    // Adopting the same key proves the sealed file through a touch.
+    file.adopt(&secret, Protection::TouchId { reason: "adopt it" })
+        .unwrap();
+    assert_eq!(stand_in::touches(), 3);
+}
+
+#[test]
+fn a_root_key_is_never_written_under_touch_id_alone() {
+    let dir = TestDir::new();
+    let file = root_file(&dir);
+    assert!(matches!(
+        file.write(
+            &Secret::copy_of(&[4; 32]),
+            Protection::TouchId { reason: "write it" }
+        ),
+        Err(Error::RootPassphrase { .. })
+    ));
+    assert!(dir.names().is_empty());
+    assert_eq!(stand_in::touches(), 0);
+}
+
+#[test]
+fn removing_the_passphrase_beside_a_lock_that_cannot_be_checked_is_refused() {
+    let dir = TestDir::new();
+    let under = passphrase("correct horse battery staple");
+    let (file, _) = sealed_file(&dir, [6; 32], &under);
+    file.add_lock(Some(with(&under)), touch_lock()).unwrap();
+
+    // Locked out: the touch-id lock may open again later, but nothing says it will.
+    stand_in::touch(Touch::LockedOut);
+    assert_eq!(
+        locked(&file).health(Method::TouchId),
+        Some(Health::Unchecked)
+    );
+    assert!(matches!(
+        file.remove_lock(with(&under), Method::Passphrase),
+        Err(Error::NoneOpensHere { .. })
+    ));
+}
+
+#[test]
+fn a_failed_touch_id_unlock_blames_no_passphrase() {
+    let dir = TestDir::new();
+    let (file, _) = sealed_file(&dir, [6; 32], &passphrase("correct horse battery staple"));
+    let wrong = passphrase("wrong");
+    let Err(error) = locked(&file).unlock(with(&wrong)) else {
+        panic!("a wrong passphrase opened the file");
+    };
+    assert!(
+        error
+            .to_string()
+            .ends_with("wrong passphrase, or the file is damaged")
+    );
+
+    let file = KeyFile::device(dir.join("touch.key"));
+    file.write(
+        &Secret::copy_of(&[7; 32]),
+        Protection::TouchId { reason: "write it" },
+    )
+    .unwrap();
+    let mut damaged = bytes(&file);
+    let last = damaged.len() - 1;
+    damaged[last] ^= 0x01;
+    fs::remove_file(file.path()).unwrap();
+    plant(&file, &damaged);
+    let Err(error) = locked(&file).unlock(touch()) else {
+        panic!("a damaged file opened");
+    };
+    assert!(matches!(
+        error,
+        Error::Unlock {
+            method: Method::TouchId,
+            ..
+        }
+    ));
+    assert!(error.to_string().ends_with(": the file is damaged"));
 }

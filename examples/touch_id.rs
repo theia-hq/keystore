@@ -4,13 +4,13 @@
 //! cargo run --example touch_id -- <path>
 //! ```
 //!
-//! With nothing at `<path>`, it writes a new device key there and puts a `touch-id` lock on it; the
-//! new lock is proven by opening the file through it, which asks for one touch. Then, and on every
-//! later run, it lists the file's locks, says which can open on this Mac without asking for anything,
-//! and opens the key with a touch. Run it at an unlocked Mac with Touch ID set up. Delete `<path>`
-//! to start again.
+//! With nothing at `<path>`, it writes a new device key there sealed under a `touch-id` lock, so the
+//! key is never on disk plain; the new file is proven by opening it through the lock, which asks for
+//! one touch. Then, and on every later run, it lists the file's locks, says which can open on this
+//! Mac without asking for anything, and opens the key with a touch. Run it at an unlocked Mac with
+//! Touch ID set up. Delete `<path>` to start again.
 
-use keystore::{Health, KeyFile, NewLock, Protection, Secret, Stored, Unlock};
+use keystore::{Health, KeyFile, Protection, Secret, Stored, Unlock};
 
 fn main() -> Result<(), Box<dyn core::error::Error>> {
     let Some(path) = std::env::args_os().nth(1) else {
@@ -19,13 +19,10 @@ fn main() -> Result<(), Box<dyn core::error::Error>> {
     let file = KeyFile::device(path);
 
     if file.load()?.is_none() {
-        // A device key starts plain, and the lock is put on it: the same two steps a key that already
-        // exists takes.
-        file.write(&Secret::generate()?, Protection::Plain)?;
-        file.add_lock(
-            None,
-            NewLock::TouchId {
-                reason: "check the new touch-id lock opens this test key",
+        file.write(
+            &Secret::generate()?,
+            Protection::TouchId {
+                reason: "confirm the new touch-id lock opens this test key",
             },
         )?;
         println!("wrote a new device key and locked it with touch-id");
@@ -37,6 +34,7 @@ fn main() -> Result<(), Box<dyn core::error::Error>> {
     for method in locked.methods() {
         let here = match locked.health(method) {
             Some(Health::Live) => "can open on this Mac",
+            Some(Health::Unchecked) => "could not be checked now",
             Some(Health::Dead) | None => "cannot open on this Mac",
         };
         println!("{method} lock: {here}");

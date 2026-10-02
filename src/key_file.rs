@@ -11,7 +11,7 @@ use crate::kind::Kind;
 use crate::method::{Method, NewLock, Protection, Unlock};
 use crate::public_key::PublicKey;
 use crate::secret::Secret;
-use crate::stored::{Locked, Stored};
+use crate::stored::{Health, Locked, Stored};
 
 /// The most a key file is read to learn what it is. Far above any version's length, so a later
 /// version is still read far enough to be named; far below anything that costs a load to hold, so a
@@ -122,8 +122,9 @@ impl KeyFile {
     /// so two writers racing for one path cannot both win. A symbolic link at the path is something,
     /// even one that points nowhere: a write never lands through a link.
     ///
-    /// A root key file refuses a [`Protection::Plain`] write as [`Error::PlainRoot`], before anything
-    /// is staged.
+    /// A root key file refuses a [`Protection::Plain`] write as [`Error::PlainRoot`], and a
+    /// [`Protection::TouchId`] write as [`Error::RootPassphrase`], before anything is staged. A
+    /// `touch-id` write asks for one touch, to prove the staged file opens.
     pub fn write(&self, secret: &Secret, protection: Protection<'_>) -> Result<(), Error> {
         self.writable(protection)?;
         self.sweep();
@@ -148,9 +149,9 @@ impl KeyFile {
     ///
     /// "Holding this same key" is proven, never taken from a sealed file's header, which only CLAIMS
     /// a key until it unlocks (see [`Locked::public_key`]). A sealed file claiming this key is unlocked
-    /// with the passphrase `protection` carries, and a failed unlock refuses as it would anywhere.
-    /// Offered [`Protection::Plain`], there is no passphrase to prove it with, so it refuses as
-    /// [`Error::Unconfirmed`] rather than succeed on the claim.
+    /// with the lock `protection` names (its passphrase, or a touch), and a failed unlock refuses as
+    /// it would anywhere. Offered [`Protection::Plain`], there is no lock to prove it with, so it
+    /// refuses as [`Error::Unconfirmed`] rather than succeed on the claim.
     pub fn adopt(&self, secret: &Secret, protection: Protection<'_>) -> Result<(), Error> {
         let incoming = secret.public_key();
         match self.load()? {
@@ -166,6 +167,9 @@ impl KeyFile {
             Some(Stored::Locked(locked)) => match protection {
                 Protection::Passphrase(passphrase) => {
                     locked.unlock(Unlock::Passphrase(passphrase)).map(drop)
+                }
+                Protection::TouchId { reason } => {
+                    locked.unlock(Unlock::TouchId { reason }).map(drop)
                 }
                 Protection::Plain => Err(Error::Unconfirmed {
                     path: self.path.clone(),
@@ -294,10 +298,14 @@ impl KeyFile {
         }
     }
 
-    /// Whether this file may be written under `protection`: anything but a plain root key.
+    /// Whether this file may be written under `protection`: anything but a plain root key, or a root
+    /// key whose only lock opens on this Mac alone.
     fn writable(&self, protection: Protection<'_>) -> Result<(), Error> {
         match (self.kind, protection) {
             (Kind::Root, Protection::Plain) => Err(Error::PlainRoot {
+                path: self.path.clone(),
+            }),
+            (Kind::Root, Protection::TouchId { .. }) => Err(Error::RootPassphrase {
                 path: self.path.clone(),
             }),
             (Kind::Root | Kind::Device, _) => Ok(()),
@@ -350,7 +358,8 @@ impl KeyFile {
         if kept.peek().is_none() || (with.method() != method && envelope.holds(with.method())) {
             return Ok(());
         }
-        if kept.any(|kept| envelope.opens_here(kept) == Some(true)) {
+        // Only a lock known to open here counts: one that could not be checked now may be dead.
+        if kept.any(|kept| envelope.health(kept) == Some(Health::Live)) {
             return Ok(());
         }
         Err(Error::NoneOpensHere {
@@ -414,6 +423,7 @@ impl KeyFile {
             Protection::Passphrase(passphrase) => {
                 self.seal(secret, NewLock::Passphrase(passphrase))
             }
+            Protection::TouchId { reason } => self.seal(secret, NewLock::TouchId { reason }),
         }
     }
 
@@ -735,6 +745,7 @@ impl<'a> Proof<'a> {
         match protection {
             Protection::Plain => Self::Plain,
             Protection::Passphrase(passphrase) => Self::Lock(Unlock::Passphrase(passphrase)),
+            Protection::TouchId { reason } => Self::Lock(Unlock::TouchId { reason }),
         }
     }
 }

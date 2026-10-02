@@ -4,13 +4,13 @@
 //!
 //! Its parameters, every field but the blob fixed-width, integers big-endian:
 //!
-//! | offset | len | field                                                                   |
-//! | ------ | --- | ----------------------------------------------------------------------- |
-//! | 0      | 1   | access policy, `1` = a touch of a finger enrolled now, screen unlocked  |
-//! | 1      | 65  | `S`, the enclave key's public key, uncompressed (X9.63)                 |
-//! | 66     | 2   | `b`, the blob's length, 1 to 1024                                       |
-//! | 68     | b   | the blob: the enclave key, wrapped by this Mac's enclave for itself     |
-//! | 68 + b | 65  | `E`, the one-time key's public key, uncompressed (X9.63)                |
+//! | offset | len | field                                                                                                       |
+//! | ------ | --- | ----------------------------------------------------------------------------------------------------------- |
+//! | 0      | 1   | access policy, `1` = a touch of a finger enrolled when the key was made, at an unlocked screen, on this Mac |
+//! | 1      | 65  | `S`, the enclave key's public key, uncompressed (X9.63)                                                     |
+//! | 66     | 2   | `b`, the blob's length, 1 to 1024                                                                           |
+//! | 68     | b   | the blob: the enclave key, wrapped by this Mac's enclave for itself                                         |
+//! | 68 + b | 65  | `E`, the one-time key's public key, uncompressed (X9.63)                                                    |
 //!
 //! **Locking** asks nothing of anyone, because it needs only `S`: draw a one-time key `e`, compute
 //! `KEK = HKDF-SHA256(ikm = ECDH(e, S), salt = E || S, info = "keystore enclave lock")`, and drop `e`.
@@ -32,6 +32,8 @@ use crate::error::FormatError;
 use crate::error::{MethodError, TouchIdError};
 #[cfg(any(test, target_os = "macos"))]
 use crate::lock::Kek;
+#[cfg(any(test, target_os = "macos"))]
+use crate::stored::Health;
 
 /// An uncompressed P-256 point's length: `04`, then x, then y.
 pub(crate) const POINT_LEN: usize = 65;
@@ -218,8 +220,10 @@ pub(crate) trait Agree {
         reason: &str,
     ) -> Result<Zeroizing<[u8; SECRET_LEN]>, TouchIdError>;
 
-    /// Whether the key would open here given a touch, asked without showing anything.
-    fn opens_here(&self) -> bool;
+    /// Whether the key would open here given a touch, asked without showing anything: [`Health::Live`]
+    /// when the enclave refuses only for want of a person, [`Health::Dead`] only when the enclave
+    /// refuses the key itself, and [`Health::Unchecked`] for any other answer.
+    fn health(&self) -> Health;
 }
 
 #[cfg(any(test, target_os = "macos"))]
@@ -266,11 +270,15 @@ impl EnclaveParams {
         Ok(derive(&shared[..], &self.one_time, &self.enclave_key)?)
     }
 
-    /// Whether this lock would open on this machine, asked of `enclave` without showing anything.
-    pub(crate) fn opens_here(&self, enclave: &impl Enclave) -> bool {
-        enclave
-            .load(&self.blob, &self.enclave_key)
-            .is_ok_and(|key| key.opens_here())
+    /// Whether this lock would open on this machine, asked of `enclave` without showing anything. A
+    /// blob that does not load here, or loads as another key, is certainly dead; any other failure to
+    /// load says only that the question could not be put now.
+    pub(crate) fn health(&self, enclave: &impl Enclave) -> Health {
+        match enclave.load(&self.blob, &self.enclave_key) {
+            Ok(key) => key.health(),
+            Err(TouchIdError::NotHere(_)) => Health::Dead,
+            Err(_) => Health::Unchecked,
+        }
     }
 }
 
@@ -349,8 +357,19 @@ impl Agree for keystore_enclave::Key {
         keystore_enclave::Key::agree(self, peer.bytes(), reason).map_err(refused)
     }
 
-    fn opens_here(&self) -> bool {
-        self.check().is_ok()
+    fn health(&self) -> Health {
+        match self.check() {
+            Ok(()) => Health::Live,
+            // The token refused the key itself: another Mac's blob, a damaged one, or one the enclave
+            // no longer holds. A blob that reloads and is then refused by CryptoTokenKit at the check,
+            // before LocalAuthentication answers, arrives here as `Load` too. Nothing will open it here.
+            Err(keystore_enclave::Error::Load(_) | keystore_enclave::Error::OtherKey) => {
+                Health::Dead
+            }
+            // A lockout, a closed lid, a locked screen: the key may well open later, so it is never
+            // reported as gone.
+            Err(_) => Health::Unchecked,
+        }
     }
 }
 

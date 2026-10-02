@@ -13,6 +13,7 @@ use zeroize::Zeroizing;
 
 use super::{Agree, Blob, Enclave, EnclaveParams, POINT_LEN, Point, Policy, SECRET_LEN};
 use crate::error::{EnclaveError, FormatError, TouchIdError};
+use crate::stored::Health;
 
 /// What a touch on the stand-in does.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -21,9 +22,15 @@ pub(crate) enum Touch {
     Matches,
     /// The person cancels the dialog.
     Cancelled,
-    /// The enrolled fingers changed since the key was made: the key is gone for good, and the
-    /// enclave says so without asking anyone.
+    /// The enclave refuses the key itself at the check, without asking anyone: what the real one does
+    /// (CryptoTokenKit, before LocalAuthentication answers) for a damaged blob or another Mac's. A
+    /// key ended by a change to the enrolled fingers may answer this way too; that is not yet observed.
     Ended,
+    /// Biometry is locked out after failed touches: the enclave refuses, but not the key itself, so
+    /// the key may open again later.
+    LockedOut,
+    /// The enclave fails to load the key with an answer that says nothing about the key.
+    Unrecognised,
 }
 
 thread_local! {
@@ -66,6 +73,10 @@ enum StandInError {
     Cancelled,
     #[error("the enrolled fingers changed")]
     Ended,
+    #[error("biometry is locked out")]
+    LockedOut,
+    #[error("the enclave gave an answer that says nothing about the key")]
+    Unrecognised,
     #[error("the peer is not a P-256 public key")]
     Peer,
 }
@@ -96,6 +107,11 @@ impl Enclave for StandIn {
     }
 
     fn load(&self, blob: &Blob, public: &Point) -> Result<StandInKey, TouchIdError> {
+        if TOUCH.get() == Touch::Unrecognised {
+            return Err(TouchIdError::Enclave(EnclaveError::new(
+                StandInError::Unrecognised,
+            )));
+        }
         let not_here = |why| TouchIdError::NotHere(EnclaveError::new(why));
         let Some((&mac, scalar)) = blob.bytes().split_first() else {
             return Err(not_here(StandInError::Damaged));
@@ -135,6 +151,11 @@ impl Agree for StandInKey {
                     StandInError::Ended,
                 )));
             }
+            Touch::LockedOut | Touch::Unrecognised => {
+                return Err(TouchIdError::Enclave(EnclaveError::new(
+                    StandInError::LockedOut,
+                )));
+            }
         }
         // The real enclave refuses a peer off the curve the same way, as its own failure.
         let peer = p256::PublicKey::from_sec1_bytes(peer.bytes())
@@ -145,8 +166,12 @@ impl Agree for StandInKey {
         Ok(secret)
     }
 
-    fn opens_here(&self) -> bool {
-        TOUCH.get() != Touch::Ended
+    fn health(&self) -> Health {
+        match TOUCH.get() {
+            Touch::Matches | Touch::Cancelled => Health::Live,
+            Touch::Ended => Health::Dead,
+            Touch::LockedOut | Touch::Unrecognised => Health::Unchecked,
+        }
     }
 }
 
@@ -241,7 +266,7 @@ fn a_blob_is_one_to_1024_bytes() {
 fn another_macs_lock_does_not_load_here_and_asks_for_no_touch() {
     let (params, _) = enrolled();
     on_mac(2);
-    assert!(!params.opens_here(&StandIn));
+    assert_eq!(params.health(&StandIn), Health::Dead);
     assert!(matches!(
         params.kek(&StandIn, "open the test key"),
         Err(crate::error::MethodError::TouchId(TouchIdError::NotHere(_)))
@@ -250,11 +275,38 @@ fn another_macs_lock_does_not_load_here_and_asks_for_no_touch() {
 }
 
 #[test]
-fn a_lock_ended_by_new_fingers_reads_as_dead_without_a_touch() {
+fn a_lock_the_enclave_refuses_reads_as_dead_without_a_touch() {
     let (params, _) = enrolled();
-    assert!(params.opens_here(&StandIn));
+    assert_eq!(params.health(&StandIn), Health::Live);
     touch(Touch::Ended);
-    assert!(!params.opens_here(&StandIn));
+    assert_eq!(params.health(&StandIn), Health::Dead);
+    assert_eq!(touches(), 0);
+}
+
+#[test]
+fn a_lockout_reads_as_unchecked_never_dead() {
+    let (params, _) = enrolled();
+    touch(Touch::LockedOut);
+    assert_eq!(params.health(&StandIn), Health::Unchecked);
+    assert_eq!(touches(), 0);
+}
+
+#[test]
+fn a_blob_that_reloads_as_another_key_reads_as_dead() {
+    let (_, mut bytes) = enrolled();
+    let (other, _) = enrolled();
+    // This lock's blob, beside another lock's enclave key.
+    bytes[1..1 + POINT_LEN].copy_from_slice(other.enclave_key.bytes());
+    let params = EnclaveParams::parse(&bytes).unwrap();
+    assert_eq!(params.health(&StandIn), Health::Dead);
+    assert_eq!(touches(), 0);
+}
+
+#[test]
+fn an_answer_that_says_nothing_about_the_key_reads_as_unchecked() {
+    let (params, _) = enrolled();
+    touch(Touch::Unrecognised);
+    assert_eq!(params.health(&StandIn), Health::Unchecked);
     assert_eq!(touches(), 0);
 }
 
@@ -268,7 +320,7 @@ fn the_secure_enclave_opens_what_it_locked_once_per_touch() {
     use super::SecureEnclave;
 
     let (params, kek) = EnclaveParams::enroll(&SecureEnclave).unwrap();
-    assert!(params.opens_here(&SecureEnclave));
+    assert_eq!(params.health(&SecureEnclave), Health::Live);
     for time in ["first", "second"] {
         let opened = params
             .kek(&SecureEnclave, &format!("open a test key, the {time} time"))

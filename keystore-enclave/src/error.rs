@@ -11,10 +11,10 @@ use core_foundation::error::{CFError, CFErrorRef};
 #[non_exhaustive]
 pub enum Error {
     /// The access control a new key is made under could not be built.
-    #[error("the secure enclave's access control could not be made")]
+    #[error("the Secure Enclave's access control could not be made")]
     AccessControl(#[source] OsError),
     /// The Secure Enclave did not make a key: no enclave on this Mac, or the screen is locked.
-    #[error("the secure enclave could not make a key")]
+    #[error("the Secure Enclave could not make a key")]
     Create(#[source] OsError),
     /// The new key came back without the blob that names it, so there is nothing to keep.
     #[error("the new enclave key has no blob to keep")]
@@ -22,7 +22,7 @@ pub enum Error {
     /// The blob does not load, or loads and cannot be used, in this Mac's enclave: a blob made on
     /// another Mac, or a damaged one. The two cannot be told apart: the enclave refuses both the
     /// same way.
-    #[error("the key blob does not open in this Mac's secure enclave")]
+    #[error("the key blob does not open in this Mac's Secure Enclave")]
     Load(#[source] OsError),
     /// The blob holds a different key than the public key it was loaded against.
     #[error("the key blob holds a different key than the one expected")]
@@ -40,14 +40,17 @@ pub enum Error {
     #[error("the new enclave key opened with nobody asked, so it guards nothing")]
     Unguarded,
     /// The enclave could not agree a secret for another reason.
-    #[error("the secure enclave could not agree a secret")]
+    #[error("the Secure Enclave could not agree a secret")]
     Agree(#[source] OsError),
     /// The enclave answered with a secret of the wrong length.
-    #[error("the secure enclave agreed a secret of {found} bytes, not 32")]
+    #[error("the Secure Enclave agreed a secret of {found} bytes, not 32")]
     SecretLength {
         /// The length the enclave returned.
         found: usize,
     },
+    /// [`Key::agree`](crate::Key::agree) was given no reason to show in the dialog.
+    #[error("the reason shown in the Touch ID dialog is empty")]
+    NoReason,
     /// The system has no `LAContext` to ask a person through.
     #[error("this Mac has no local authentication context")]
     NoContext,

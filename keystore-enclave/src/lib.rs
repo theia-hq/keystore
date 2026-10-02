@@ -1,7 +1,7 @@
 //! A P-256 key in this Mac's Secure Enclave, kept as a blob in a file of your own, that agrees a secret
-//! with a peer key only after a touch of a finger enrolled now.
+//! with a peer key only after a touch of a finger enrolled when the key was made.
 //!
-//! Three calls, and nothing else:
+//! Four calls:
 //!
 //! - [`create`] makes a key in the enclave and returns its blob and its public key. Nothing is asked
 //!   of anyone, and nothing goes in the keychain: the key is not permanent, so the blob is where it
@@ -9,6 +9,7 @@
 //! - [`load`] takes a blob back and checks it holds the public key you expect.
 //! - [`Key::agree`] does ECDH between the enclave key and a peer's public key. It is the one call that
 //!   asks for a touch, with your reason in the dialog, and it asks again every time.
+//! - [`Key::check`] says, with no dialog, whether the key is this Mac's and still guarded.
 //!
 //! Wrapping a secret to the key needs only its public key, so it never touches the enclave: draw a
 //! one-time P-256 key, agree with the enclave key's public half, and derive from that. Opening it
@@ -23,6 +24,20 @@
 //! The dialog names the program that asks; the person touching it decides.
 //!
 //! The crate is empty on every target but macOS.
+//!
+//! ```no_run
+//! # fn main() -> Result<(), keystore_enclave::Error> {
+//! # let peer = [4; keystore_enclave::PUBLIC_KEY_LEN];
+//! use keystore_enclave::{Policy, create, load};
+//!
+//! let (blob, public) = create(Policy::BiometryCurrentSet)?; // keep both in your own file
+//! let key = load(&blob, &public)?;
+//! key.check()?; // this Mac's key, still guarded; no dialog
+//! let secret = key.agree(&peer, "open your key")?; // asks for a touch
+//! # drop(secret);
+//! # Ok(())
+//! # }
+//! ```
 
 #![cfg(target_os = "macos")]
 // The workspace denies `unsafe`; this crate exists to hold the calls into Security.framework and

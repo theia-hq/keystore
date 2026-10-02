@@ -64,7 +64,10 @@ impl Policy {
 ///
 /// Before returning, the key is reloaded from its blob and asked for an agreement with nobody allowed
 /// to answer. It must refuse for want of a person; a key that opens anyway guards nothing, and is
-/// refused here as [`Error::Unguarded`] rather than handed out.
+/// refused here as [`Error::Unguarded`] rather than handed out. That self-test refuses a key with no
+/// access control, and nothing finer: a key that let the login password or a newly enrolled finger in
+/// would pass it too. Which access control a key gets is pinned by `policy` alone, and the crate's
+/// source test holds `Policy::BiometryCurrentSet` to its two flags.
 pub fn create(policy: Policy) -> Result<(Vec<u8>, [u8; PUBLIC_KEY_LEN]), Error> {
     let mut error: CFErrorRef = ptr::null_mut();
     // SAFETY: the protection class is a static `CFString`, the flags are plain bits, and the error
@@ -80,20 +83,23 @@ pub fn create(policy: Policy) -> Result<(Vec<u8>, [u8; PUBLIC_KEY_LEN]), Error> 
     let access = owned(access.cast_const().cast(), error).map_err(Error::AccessControl)?;
 
     let mut private = CFMutableDictionary::<CFType, CFType>::new();
-    private.set(
-        string(&raw const kSecAttrIsPermanent),
-        CFBoolean::false_value().as_CFType(),
-    );
-    private.set(string(&raw const kSecAttrAccessControl), access);
     let mut attributes = ec_attributes();
-    attributes.set(
-        string(&raw const kSecAttrTokenID),
-        string(&raw const kSecAttrTokenIDSecureEnclave),
-    );
-    attributes.set(
-        string(&raw const kSecPrivateKeyAttrs),
-        private.to_immutable().as_CFType(),
-    );
+    // SAFETY: every pointer handed to `string` here is the address of a Security.framework static.
+    unsafe {
+        private.set(
+            string(&raw const kSecAttrIsPermanent),
+            CFBoolean::false_value().as_CFType(),
+        );
+        private.set(string(&raw const kSecAttrAccessControl), access);
+        attributes.set(
+            string(&raw const kSecAttrTokenID),
+            string(&raw const kSecAttrTokenIDSecureEnclave),
+        );
+        attributes.set(
+            string(&raw const kSecPrivateKeyAttrs),
+            private.to_immutable().as_CFType(),
+        );
+    }
 
     let mut error: CFErrorRef = ptr::null_mut();
     // SAFETY: the attributes are a live dictionary and the error out-parameter is valid.
@@ -151,6 +157,10 @@ impl Key {
         peer: &[u8; PUBLIC_KEY_LEN],
         reason: &str,
     ) -> Result<Zeroizing<[u8; SECRET_LEN]>, Error> {
+        // The dialog shows the reason as the whole of why it asks; an empty one asks with no why.
+        if reason.trim().is_empty() {
+            return Err(Error::NoReason);
+        }
         let context = Context::asking(reason)?;
         let key = self.reload(Some(&context))?;
         exchange(&key, peer)
@@ -176,22 +186,25 @@ impl Key {
     fn reload(&self, context: Option<&Context>) -> Result<CFType, Error> {
         let mut attributes = ec_attributes();
         attributes.set(
-            string(&raw const kSecAttrKeyClass),
-            string(&raw const kSecAttrKeyClassPrivate),
-        );
-        attributes.set(
-            string(&raw const kSecAttrTokenID),
-            string(&raw const kSecAttrTokenIDSecureEnclave),
-        );
-        attributes.set(
             CFString::new(TOKEN_OBJECT).as_CFType(),
             self.blob.as_CFType(),
         );
-        if let Some(context) = context {
+        // SAFETY: every pointer handed to `string` here is the address of a Security.framework static.
+        unsafe {
             attributes.set(
-                string(&raw const kSecUseAuthenticationContext),
-                context.as_cf_type().clone(),
+                string(&raw const kSecAttrKeyClass),
+                string(&raw const kSecAttrKeyClassPrivate),
             );
+            attributes.set(
+                string(&raw const kSecAttrTokenID),
+                string(&raw const kSecAttrTokenIDSecureEnclave),
+            );
+            if let Some(context) = context {
+                attributes.set(
+                    string(&raw const kSecUseAuthenticationContext),
+                    context.as_cf_type().clone(),
+                );
+            }
         }
         let mut error: CFErrorRef = ptr::null_mut();
         // SAFETY: the data argument is empty because the token and its object id name the key; the
@@ -276,10 +289,13 @@ fn public_of(key: &CFType) -> Result<[u8; PUBLIC_KEY_LEN], Error> {
 /// A P-256 public key from its uncompressed X9.63 bytes.
 fn public_key(bytes: &[u8; PUBLIC_KEY_LEN]) -> Result<CFType, Error> {
     let mut attributes = ec_attributes();
-    attributes.set(
-        string(&raw const kSecAttrKeyClass),
-        string(&raw const kSecAttrKeyClassPublic),
-    );
+    // SAFETY: every pointer handed to `string` here is the address of a Security.framework static.
+    unsafe {
+        attributes.set(
+            string(&raw const kSecAttrKeyClass),
+            string(&raw const kSecAttrKeyClassPublic),
+        );
+    }
     let mut error: CFErrorRef = ptr::null_mut();
     // SAFETY: the data and the attributes are live, and the error out-parameter is valid.
     let public = unsafe {
@@ -295,14 +311,17 @@ fn public_key(bytes: &[u8; PUBLIC_KEY_LEN]) -> Result<CFType, Error> {
 /// The attributes every key here shares: a 256-bit key on the NIST P-256 curve.
 fn ec_attributes() -> CFMutableDictionary<CFType, CFType> {
     let mut attributes = CFMutableDictionary::<CFType, CFType>::new();
-    attributes.set(
-        string(&raw const kSecAttrKeyType),
-        string(&raw const kSecAttrKeyTypeECSECPrimeRandom),
-    );
-    attributes.set(
-        string(&raw const kSecAttrKeySizeInBits),
-        CFNumber::from(256_i32).as_CFType(),
-    );
+    // SAFETY: every pointer handed to `string` here is the address of a Security.framework static.
+    unsafe {
+        attributes.set(
+            string(&raw const kSecAttrKeyType),
+            string(&raw const kSecAttrKeyTypeECSECPrimeRandom),
+        );
+        attributes.set(
+            string(&raw const kSecAttrKeySizeInBits),
+            CFNumber::from(256_i32).as_CFType(),
+        );
+    }
     attributes
 }
 
@@ -317,10 +336,14 @@ fn owned(reference: CFTypeRef, error: CFErrorRef) -> Result<CFType, OsError> {
 }
 
 /// One of Security.framework's exported `CFString` constants, as a dictionary key or value.
-fn string(constant: *const CFStringRef) -> CFType {
-    // SAFETY: `constant` is the address of a static the framework initialises before any code of
-    // ours runs and never writes again, and it names a `CFString` that lives for the process; the
-    // get rule retains it for the wrapper's life.
+///
+/// # Safety
+///
+/// `constant` must be the address of one of the framework's exported `CFString` statics, which it
+/// initialises before any code of ours runs and never writes again.
+unsafe fn string(constant: *const CFStringRef) -> CFType {
+    // SAFETY: the caller vouches that `constant` is such a static; the `CFString` it names lives for
+    // the process, and the get rule retains it for the wrapper's life.
     unsafe { CFString::wrap_under_get_rule(*constant) }.as_CFType()
 }
 
@@ -328,3 +351,7 @@ fn string(constant: *const CFStringRef) -> CFType {
 fn sec_key(key: &CFType) -> SecKeyRef {
     key.as_CFTypeRef().cast_mut().cast()
 }
+
+#[cfg(test)]
+#[path = "key_tests.rs"]
+mod key_tests;

@@ -333,8 +333,14 @@ fn the_secret_owners_are_built_to_wipe() {
     }
 }
 
-/// The crate paths a method module may name: its errors, the key it makes, and its caller's input.
-const METHOD_CRATE_PATHS: &[&str] = &["crate::error::", "crate::lock::Kek", "crate::passphrase::"];
+/// The crate paths a method module may name: its errors, the key it makes, its caller's input, and
+/// what it can say of its own health.
+const METHOD_CRATE_PATHS: &[&str] = &[
+    "crate::error::",
+    "crate::lock::Kek",
+    "crate::passphrase::",
+    "crate::stored::Health",
+];
 
 /// The external crates a method module may name: its derivation and its randomness, the curve and
 /// the enclave a `touch-id` lock agrees through, and the wipe.

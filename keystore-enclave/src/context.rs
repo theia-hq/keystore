@@ -15,7 +15,9 @@ use crate::error::Error;
 type Id = *mut c_void;
 type Sel = *mut c_void;
 
-// Linked for the `LAContext` class; nothing in it is called by symbol.
+// Linked for the `LAContext` class; nothing in it is called by symbol. The four selectors below are
+// sent by hand through `objc_msgSend`, which avoids a dependency; a fifth is the point to take
+// `objc2` instead.
 #[link(name = "LocalAuthentication", kind = "framework")]
 unsafe extern "C" {}
 
@@ -90,7 +92,7 @@ impl Drop for Context {
     fn drop(&mut self) {
         // SAFETY: `-invalidate` takes no arguments and is valid on a live context; the release that
         // follows (the field's own drop) is the last use.
-        unsafe { send(self.id(), c"invalidate".as_ptr()) };
+        unsafe { send_void(self.id(), c"invalidate".as_ptr()) };
     }
 }
 
@@ -108,6 +110,21 @@ unsafe fn send(receiver: Id, selector: *const c_char) -> Id {
             unsafe extern "C" fn(Id, Sel) -> Id,
         >(objc_msgSend);
         call(receiver, sel_registerName(selector))
+    }
+}
+
+/// `objc_msgSend` as a call of no arguments and no result.
+///
+/// # Safety
+///
+/// As [`send`], for a selector that returns nothing.
+unsafe fn send_void(receiver: Id, selector: *const c_char) {
+    // SAFETY: as in `send`, for this signature.
+    unsafe {
+        let call = core::mem::transmute::<unsafe extern "C" fn(), unsafe extern "C" fn(Id, Sel)>(
+            objc_msgSend,
+        );
+        call(receiver, sel_registerName(selector));
     }
 }
 

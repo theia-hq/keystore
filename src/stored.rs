@@ -56,15 +56,18 @@ impl Locked {
     /// for anything; `None` when the file holds no such lock.
     ///
     /// A passphrase lock is always [`Health::Live`]: whether the passphrase is right is known only by
-    /// trying it. A `touch-id` lock is live on the Mac whose enclave made it, while the fingers it was
-    /// made under are the ones enrolled; there, the enclave is asked with no dialog allowed, and
-    /// refuses only for want of a touch. Another Mac's lock, a damaged one, and one ended by a change
-    /// to the enrolled fingers are [`Health::Dead`], as is every `touch-id` lock on a build with no
-    /// enclave.
+    /// trying it. A `touch-id` lock is asked of the enclave with no dialog allowed. It is
+    /// [`Health::Live`] when the enclave refuses only for want of a touch, and [`Health::Dead`] when the
+    /// enclave refuses the key itself: another Mac's lock, or a damaged one. Every `touch-id` lock is
+    /// dead on a build with no enclave. Any other answer is [`Health::Unchecked`], never dead.
+    ///
+    /// Whether a lock ended by a change to the enrolled fingers reads as dead here is not yet known: it
+    /// depends on what the enclave answers for such a key with no dialog allowed.
+    ///
+    /// A lock someone else put on the file, for a key they made in this Mac's enclave, reads as live:
+    /// telling it from your own takes the touch, because only the unwrap shows whose file key it holds.
     pub fn health(&self, method: Method) -> Option<Health> {
-        self.envelope
-            .opens_here(method)
-            .map(|live| if live { Health::Live } else { Health::Dead })
+        self.envelope.health(method)
     }
 
     /// The public key this file CLAIMS to seal, read from its header without unlocking.
@@ -104,7 +107,7 @@ impl Locked {
     pub(crate) fn refused(&self, refusal: Refusal) -> Error {
         let path = self.path.clone();
         match refusal {
-            Refusal::Unlock => Error::Unlock { path },
+            Refusal::Unlock(method) => Error::Unlock { path, method },
             Refusal::Inconsistent => Error::Inconsistent { path },
             Refusal::NoLock(method) => Error::NoLock { path, method },
             Refusal::TouchId(source) => Error::TouchId { path, source },
@@ -121,6 +124,9 @@ pub enum Health {
     Live,
     /// It cannot open the file here, whatever is offered.
     Dead,
+    /// It could not be checked now: the enclave gave an answer that says neither, as a lockout after
+    /// failed touches may. It may open later.
+    Unchecked,
 }
 
 /// Names the file, the public key, and its locks, never the sealed bytes.

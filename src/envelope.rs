@@ -40,6 +40,7 @@ use crate::lock::{FileKey, Lock};
 use crate::method::{Method, NewLock, Unlock};
 use crate::public_key::PublicKey;
 use crate::secret::{SEED_LEN, Secret};
+use crate::stored::Health;
 
 /// Every sealed key file opens with these bytes, at every version, forever.
 ///
@@ -142,6 +143,8 @@ pub(crate) struct Envelope {
 pub(crate) struct Opened {
     pub(crate) secret: Secret,
     file_key: FileKey,
+    /// The method of the lock that opened it, so a later refusal can say which input it doubts.
+    method: Method,
 }
 
 impl Opened {
@@ -253,18 +256,23 @@ impl Envelope {
             return Err(Refusal::NoLock(with.method()));
         };
         let file_key = lock.open(with, &self.header)?;
-        let secret = self.open_with(&file_key)?;
-        Ok(Opened { secret, file_key })
+        let secret = self.open_with(&file_key, with.method())?;
+        Ok(Opened {
+            secret,
+            file_key,
+            method: with.method(),
+        })
     }
 
     /// Open the seed with the file key another unlock of this file's key already holds: how a lock
     /// removal proves its new form, since the lock that opened the old form may be the one removed.
     pub(crate) fn reopen(&self, opened: &Opened) -> Result<Secret, Refusal> {
-        self.open_with(&opened.file_key)
+        self.open_with(&opened.file_key, opened.method)
     }
 
-    /// Open the seed with a file key already in hand, and hold it to the header's public key.
-    fn open_with(&self, file_key: &FileKey) -> Result<Secret, Refusal> {
+    /// Open the seed with a file key already in hand, which the lock of `method` gave, and hold it to
+    /// the header's public key.
+    fn open_with(&self, file_key: &FileKey, method: Method) -> Result<Secret, Refusal> {
         let seed = match cipher::open(
             file_key.bytes(),
             &self.seed_nonce,
@@ -272,7 +280,7 @@ impl Envelope {
             &self.sealed_seed,
         ) {
             Ok(seed) => seed,
-            Err(Failed::Tag) => return Err(Refusal::Unlock),
+            Err(Failed::Tag) => return Err(Refusal::Unlock(method)),
             Err(Failed::Crypto(source)) => return Err(Refusal::Crypto(source)),
         };
         let secret = Secret::copy_of(&seed);
@@ -346,8 +354,8 @@ impl Envelope {
 
     /// Whether this file's lock of `method` can open it on this machine, asked without showing
     /// anything; `None` when the file holds no such lock.
-    pub(crate) fn opens_here(&self, method: Method) -> Option<bool> {
-        self.lock(method).map(Lock::opens_here)
+    pub(crate) fn health(&self, method: Method) -> Option<Health> {
+        self.lock(method).map(Lock::health)
     }
 
     fn lock(&self, method: Method) -> Option<&Lock> {
@@ -363,8 +371,9 @@ impl Envelope {
 /// Why a parsed envelope did not unlock. The key file attaches its path to each.
 #[derive(Debug)]
 pub(crate) enum Refusal {
-    /// Wrong passphrase, or the file was damaged: deliberately one case.
-    Unlock,
+    /// The input did not open the lock of this method (for a passphrase: the wrong one), or the
+    /// file was damaged: deliberately one case.
+    Unlock(Method),
     /// The seal opened, but the header names a different key.
     Inconsistent,
     /// The file holds no lock of this method.

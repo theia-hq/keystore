@@ -18,7 +18,7 @@ pub enum Method {
     /// that.
     Passphrase,
     /// A touch on this Mac: a key in its Secure Enclave, kept as a blob in the lock, agrees a secret
-    /// with a one-time key after a touch of a finger enrolled now, and the file key is wrapped under a
+    /// with a one-time key after a touch of a finger enrolled when the lock was made, and the file key is wrapped under a
     /// key derived from that.
     TouchId,
 }
@@ -105,11 +105,17 @@ impl<'a> NewLock<'a> {
 
 /// How a new key file is written: plain, or sealed with one lock. The input to
 /// [`KeyFile::write`](crate::KeyFile::write) and [`KeyFile::adopt`](crate::KeyFile::adopt), where the
-/// same passphrase also proves a sealed file already at the path.
+/// same lock also proves a sealed file already at the path.
 #[derive(Clone, Copy, Debug)]
 pub enum Protection<'a> {
     /// Store the raw seed.
     Plain,
     /// Seal the seed under one passphrase lock, or unlock it with this passphrase.
     Passphrase(&'a Passphrase),
+    /// Seal the seed under one `touch-id` lock, or unlock it with a touch, showing `reason` in the
+    /// dialog. A new key sealed this way is never on disk plain, not even for a moment.
+    TouchId {
+        /// Why the touch is asked for.
+        reason: &'a str,
+    },
 }

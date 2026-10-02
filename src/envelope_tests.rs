@@ -336,7 +336,7 @@ fn a_device_key_relabelled_as_a_root_key_does_not_unlock() {
     let envelope = sealed_as(&relabelled, Kind::Root);
     assert!(matches!(
         open(&envelope, &golden_passphrase()),
-        Err(Refusal::Unlock)
+        Err(Refusal::Unlock(_))
     ));
 }
 
@@ -376,7 +376,7 @@ fn a_wrong_passphrase_and_a_damaged_file_are_one_refusal() {
 
     assert!(matches!(
         open(&sealed(&image), &passphrase("Correct horse battery staple")),
-        Err(Refusal::Unlock)
+        Err(Refusal::Unlock(_))
     ));
     // One flipped bit in every field the lock or the seed's seal authenticates. The Argon2id fields
     // flip to values still inside the bounds, so the damage reaches the cipher rather than the parser.
@@ -398,7 +398,7 @@ fn a_wrong_passphrase_and_a_damaged_file_are_one_refusal() {
         let mut damaged = image.clone();
         damaged[at] ^= bit;
         assert!(
-            matches!(open(&sealed(&damaged), &under), Err(Refusal::Unlock)),
+            matches!(open(&sealed(&damaged), &under), Err(Refusal::Unlock(_))),
             "a damaged {field} was not refused as a failed unlock"
         );
     }
@@ -421,7 +421,7 @@ fn any_edit_to_a_lock_fails_the_whole_file() {
         let mut edited = image.clone();
         edited[at] ^= 0x01;
         assert!(
-            matches!(open(&sealed(&edited), &under), Err(Refusal::Unlock)),
+            matches!(open(&sealed(&edited), &under), Err(Refusal::Unlock(_))),
             "an edit at byte {at} opened"
         );
     }
@@ -456,7 +456,7 @@ fn any_edit_to_a_lock_fails_the_whole_file() {
         panic!("the swapped-in lock does not open on its own");
     };
     assert_eq!(opened_key.bytes(), &golden_file_key());
-    assert!(matches!(open(&envelope, &under), Err(Refusal::Unlock)));
+    assert!(matches!(open(&envelope, &under), Err(Refusal::Unlock(_))));
 }
 
 #[test]
@@ -925,10 +925,10 @@ fn reordering_two_locks_fails_the_whole_file() {
         envelope.methods().collect::<Vec<_>>(),
         [Method::TouchId, Method::Passphrase]
     );
-    assert!(matches!(envelope.unlock(touch()), Err(Refusal::Unlock)));
+    assert!(matches!(envelope.unlock(touch()), Err(Refusal::Unlock(_))));
     assert!(matches!(
         open(&envelope, &golden_passphrase()),
-        Err(Refusal::Unlock)
+        Err(Refusal::Unlock(_))
     ));
 }
 
@@ -962,7 +962,7 @@ fn any_edit_to_a_touch_id_lock_fails_the_whole_file() {
         assert!(
             matches!(
                 open(&sealed(&edited), &golden_passphrase()),
-                Err(Refusal::Unlock)
+                Err(Refusal::Unlock(_))
             ),
             "an edit at byte {at} left the passphrase opening the file"
         );
