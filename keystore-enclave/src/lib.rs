@@ -26,6 +26,10 @@
 //! The crate is empty on every target but macOS.
 //!
 //! ```no_run
+//! # // The crate is empty off macOS, so the example compiles there alone.
+//! # #[cfg(not(target_os = "macos"))]
+//! # fn main() {}
+//! # #[cfg(target_os = "macos")]
 //! # fn main() -> Result<(), keystore_enclave::Error> {
 //! # let peer = [4; keystore_enclave::PUBLIC_KEY_LEN];
 //! use keystore_enclave::{Policy, create, load};
