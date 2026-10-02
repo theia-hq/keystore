@@ -65,10 +65,15 @@ pub enum Error {
     /// A lock did not open, or the seed did not open under the key it gave. A wrong passphrase and
     /// damaged contents are deliberately this one variant: the cipher cannot tell them apart, and a
     /// refusal that guessed would be an oracle.
-    #[error("could not unlock the key file {}: wrong passphrase, or the file is damaged", path.display())]
+    ///
+    /// A `touch-id` lock refuses this way only after its touch: the file's contents are checked by
+    /// the cipher, and the cipher needs the key the touch gives, so no damage can be found before it.
+    #[error("could not unlock the key file {}: {}", path.display(), unlock_cause(*method))]
     Unlock {
         /// The key file.
         path: PathBuf,
+        /// The method of the lock that was tried.
+        method: Method,
     },
     /// A sealed file unlocked, but its header names a different public key than the seed it seals.
     #[error("the key file {} seals a different key than its header names", path.display())]
@@ -117,12 +122,36 @@ pub enum Error {
         /// The key file.
         path: PathBuf,
     },
-    /// A lock removal asked to take a root key's passphrase lock. A root key always keeps it: it is
-    /// the lock that opens a copy of the file on any machine.
-    #[error("a root key always keeps its passphrase lock; {} was not changed", path.display())]
+    /// A lock change would leave a root key with no lock that opens on another machine: removing its
+    /// passphrase lock, or sealing a plain root under a lock that opens on this machine alone. A root
+    /// key always keeps one, because it is how a copy of the file opens anywhere else.
+    #[error("a root key always has a passphrase lock; {} was not changed", path.display())]
     RootPassphrase {
         /// The key file.
         path: PathBuf,
+    },
+    /// A lock change asked to set a root key's passphrase lock while opening the file with a lock
+    /// that opens on this machine alone. Whoever holds only that lock must not be able to set a
+    /// passphrase that opens every copy of the root.
+    #[error(
+        "a root key's passphrase changes only when the file is opened with it; {} was not changed",
+        path.display()
+    )]
+    RootPassphraseNeeded {
+        /// The key file.
+        path: PathBuf,
+    },
+    /// A lock removal would leave no lock that opens the file on this machine: none of the others
+    /// is the one that opened it, and none can open here (another Mac's `touch-id` lock, say).
+    #[error(
+        "removing the {method} lock would leave {} with no lock that opens on this machine; it was not changed",
+        path.display()
+    )]
+    NoneOpensHere {
+        /// The key file.
+        path: PathBuf,
+        /// The method whose removal was refused.
+        method: Method,
     },
     /// A lock change found no file to change.
     #[error("there is no key file at {}", path.display())]
@@ -191,6 +220,15 @@ pub enum Error {
         #[source]
         source: io::Error,
     },
+    /// A `touch-id` lock could not be made or did not open.
+    #[error("could not use the touch-id lock of the key file {}", path.display())]
+    TouchId {
+        /// The key file.
+        path: PathBuf,
+        /// Why.
+        #[source]
+        source: TouchIdError,
+    },
     /// Sealing or unlocking could not run.
     #[error("could not seal or unlock the key file {}", path.display())]
     Crypto {
@@ -200,6 +238,15 @@ pub enum Error {
         #[source]
         source: CryptoError,
     },
+}
+
+/// What a failed unlock through a lock of `method` can mean. A touch that agreed has no wrong input to
+/// blame, so only the passphrase names one.
+const fn unlock_cause(method: Method) -> &'static str {
+    match method {
+        Method::Passphrase => "wrong passphrase, or the file is damaged",
+        Method::TouchId => "the file is damaged",
+    }
 }
 
 /// Why a key file's bytes did not parse. Raised by the one parser, before any key is derived, so
@@ -249,20 +296,41 @@ pub enum FormatError {
     /// A sealed file with no locks: nothing could open it, so it is not a sealed key.
     #[error("the sealed key has no locks")]
     NoLocks,
+    /// A sealed root key with no lock that opens on another machine. A root key always keeps its
+    /// passphrase lock, so a list without one was not written by this crate.
+    #[error("the sealed root key has no passphrase lock")]
+    NoPortableLock,
     /// Two locks of one method. A file holds at most one of each.
     #[error("the sealed key has more than one {method} lock")]
     DuplicateLock {
         /// The method named twice.
         method: Method,
     },
-    /// A lock whose body length is not its method's, refused before its body is read.
-    #[error("a {method} lock is {} bytes, and this one says {found}", method.body_len())]
+    /// A lock whose body length is not one its method can have: past the method's most, refused
+    /// before the body is read, or not what the body's own fields add up to.
+    #[error("a {method} lock cannot be {found} bytes")]
     LockLength {
         /// The lock's method.
         method: Method,
         /// The length the record declares.
         found: u16,
     },
+    /// A `touch-id` lock's access policy this build does not know.
+    #[error("touch-id policy {found} is not one this build knows")]
+    Policy {
+        /// The policy byte.
+        found: u8,
+    },
+    /// A `touch-id` lock whose blob length does not account for its parameters: no blob, one past
+    /// the cap, or one that leaves the one-time key the wrong size.
+    #[error("a touch-id lock declares a {found}-byte blob that does not fit it")]
+    Blob {
+        /// The blob length the lock declares.
+        found: u16,
+    },
+    /// A `touch-id` lock's public key is not an uncompressed P-256 point.
+    #[error("a touch-id lock holds a public key that is not an uncompressed P-256 point")]
+    Point,
     /// A key derivation function this build does not know.
     #[error("key derivation function {found} is not one this build knows")]
     Kdf {
@@ -309,6 +377,16 @@ enum Primitive {
     // A value rather than a panic for the same reason as `Cipher`.
     #[error("too many locks to seal: a key file holds at most 255")]
     LockCount,
+    // A scalar outside the curve's order is about one draw in 2^32; several in a row is a random
+    // source that is not random.
+    #[cfg(any(test, target_os = "macos"))]
+    #[error("could not draw a one-time key")]
+    OneTimeKey,
+    // HKDF refuses only an output longer than 255 hashes, and 32 bytes is one. A value rather than a
+    // panic for the same reason as `Cipher`.
+    #[cfg(any(test, target_os = "macos"))]
+    #[error("hkdf could not derive a key")]
+    Derive,
 }
 
 impl CryptoError {
@@ -330,5 +408,86 @@ impl CryptoError {
 
     pub(crate) const fn lock_count() -> Self {
         Self(Primitive::LockCount)
+    }
+
+    #[cfg(any(test, target_os = "macos"))]
+    pub(crate) const fn one_time_key() -> Self {
+        Self(Primitive::OneTimeKey)
+    }
+
+    #[cfg(any(test, target_os = "macos"))]
+    pub(crate) const fn derive() -> Self {
+        Self(Primitive::Derive)
+    }
+}
+
+/// Why a `touch-id` lock could not be made or opened.
+///
+/// The variants are the cases a caller tells a person apart: this machine cannot do it at all, the
+/// lock is not this Mac's, or the person said no. The enclave's own error rides the `source()` chain.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum TouchIdError {
+    /// This build has no Secure Enclave to ask: it is not a macOS build.
+    #[error("a touch-id lock opens only on macOS")]
+    Unavailable,
+    /// The lock's key does not open in this Mac's enclave with the fingers enrolled now: a lock made on
+    /// another Mac, one made before a finger was added or removed (if a finger was added, the lock opens
+    /// again once it is removed), or a damaged one. Told apart from a cancel even when the enclave turns the key down after the
+    /// dialog.
+    #[error(
+        "the lock does not open on this Mac now; if a fingerprint was added after the lock was made, remove it and the lock opens again"
+    )]
+    NotHere(#[source] EnclaveError),
+    /// The person cancelled, or the touch did not match.
+    #[error("the touch was cancelled or did not match")]
+    Declined(#[source] EnclaveError),
+    /// The enclave could not make the key or agree the secret.
+    #[error("the Secure Enclave failed")]
+    Enclave(#[source] EnclaveError),
+}
+
+/// What the enclave said, kept as the cause of a [`TouchIdError`]. Opaque, so the enclave's own types
+/// stay out of this crate's surface and out of a build that has no enclave.
+#[derive(Debug, thiserror::Error)]
+#[error(transparent)]
+pub struct EnclaveError(Box<dyn core::error::Error + Send + Sync>);
+
+impl EnclaveError {
+    #[cfg(any(test, target_os = "macos"))]
+    pub(crate) fn new(source: impl core::error::Error + Send + Sync + 'static) -> Self {
+        Self(Box::new(source))
+    }
+}
+
+/// What the enclave handed back that a lock cannot hold. Raised on this side of the enclave, so it
+/// rides an [`EnclaveError`] like the enclave's own errors do.
+#[cfg(any(test, target_os = "macos"))]
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum Unusable {
+    #[error("the Secure Enclave's public key is not a P-256 point")]
+    Point,
+    #[cfg(target_os = "macos")]
+    #[error("the Secure Enclave's key blob is {found} bytes, outside what a lock holds")]
+    BlobLength { found: usize },
+}
+
+/// Why a lock's method could not make or open its key: the primitives failed, or the enclave did.
+/// Crate-private: a key file attaches its path and reports each as its own [`Error`] variant.
+#[derive(Debug)]
+pub(crate) enum MethodError {
+    Crypto(CryptoError),
+    TouchId(TouchIdError),
+}
+
+impl From<CryptoError> for MethodError {
+    fn from(source: CryptoError) -> Self {
+        Self::Crypto(source)
+    }
+}
+
+impl From<TouchIdError> for MethodError {
+    fn from(source: TouchIdError) -> Self {
+        Self::TouchId(source)
     }
 }

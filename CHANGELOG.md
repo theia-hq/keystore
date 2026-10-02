@@ -2,6 +2,30 @@
 
 All notable changes to keystore, newest first.
 
+## Unreleased
+
+### Breaking
+
+- **`Method`, `Unlock`, `NewLock` and `Protection` gain `TouchId`.** An exhaustive match on them needs
+  the new arm.
+
+### New
+
+- **`touch-id`, a second lock.** A key in a Mac's Secure Enclave opens the file after a touch. It
+  opens only on the Mac that made it, while the same fingers are enrolled; other builds read and keep
+  it. `Protection::TouchId` writes a new device key sealed under it, never on disk plain.
+  `NewLock::TouchId` adds it beside a passphrase, or as a device key's only lock. `Unlock::TouchId`
+  opens with it. `Locked::health` says, with no dialog, whether a lock opens on this machine now:
+  `Live`, `Dead`, or `Unchecked` when the enclave cannot say (a locked screen, a lockout). Format:
+  lock method `2`.
+- **A root key always keeps its passphrase lock.** A sealed root without one is refused as it is read
+  (`FormatError::NoPortableLock`), and its passphrase changes only when the file is opened with it
+  (`Error::RootPassphraseNeeded`).
+- **A removal keeps a lock that opens here.** Removing a lock is refused when locks are left, none
+  of them opened the file, and none is known to open on this machine (`Error::NoneOpensHere`).
+- **`keystore-enclave`**, the Secure Enclave calls behind `touch-id`, as a crate of its own. macOS
+  only; empty on every other target.
+
 ## v0.1.0
 
 First release.

@@ -6,12 +6,12 @@ use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
 use crate::envelope::{self, Envelope, Opened, Parsed};
-use crate::error::{CryptoError, Error, FormatError};
+use crate::error::{CryptoError, Error, FormatError, MethodError};
 use crate::kind::Kind;
 use crate::method::{Method, NewLock, Protection, Unlock};
 use crate::public_key::PublicKey;
 use crate::secret::Secret;
-use crate::stored::{Locked, Stored};
+use crate::stored::{Health, Locked, Stored};
 
 /// The most a key file is read to learn what it is. Far above any version's length, so a later
 /// version is still read far enough to be named; far below anything that costs a load to hold, so a
@@ -122,8 +122,9 @@ impl KeyFile {
     /// so two writers racing for one path cannot both win. A symbolic link at the path is something,
     /// even one that points nowhere: a write never lands through a link.
     ///
-    /// A root key file refuses a [`Protection::Plain`] write as [`Error::PlainRoot`], before anything
-    /// is staged.
+    /// A root key file refuses a [`Protection::Plain`] write as [`Error::PlainRoot`], and a
+    /// [`Protection::TouchId`] write as [`Error::RootPassphrase`], before anything is staged. A
+    /// `touch-id` write asks for one touch, to prove the staged file opens.
     pub fn write(&self, secret: &Secret, protection: Protection<'_>) -> Result<(), Error> {
         self.writable(protection)?;
         self.sweep();
@@ -148,9 +149,9 @@ impl KeyFile {
     ///
     /// "Holding this same key" is proven, never taken from a sealed file's header, which only CLAIMS
     /// a key until it unlocks (see [`Locked::public_key`]). A sealed file claiming this key is unlocked
-    /// with the passphrase `protection` carries, and a failed unlock refuses as it would anywhere.
-    /// Offered [`Protection::Plain`], there is no passphrase to prove it with, so it refuses as
-    /// [`Error::Unconfirmed`] rather than succeed on the claim.
+    /// with the lock `protection` names (its passphrase, or a touch), and a failed unlock refuses as
+    /// it would anywhere. Offered [`Protection::Plain`], there is no lock to prove it with, so it
+    /// refuses as [`Error::Unconfirmed`] rather than succeed on the claim.
     pub fn adopt(&self, secret: &Secret, protection: Protection<'_>) -> Result<(), Error> {
         let incoming = secret.public_key();
         match self.load()? {
@@ -167,6 +168,9 @@ impl KeyFile {
                 Protection::Passphrase(passphrase) => {
                     locked.unlock(Unlock::Passphrase(passphrase)).map(drop)
                 }
+                Protection::TouchId { reason } => {
+                    locked.unlock(Unlock::TouchId { reason }).map(drop)
+                }
                 Protection::Plain => Err(Error::Unconfirmed {
                     path: self.path.clone(),
                     claimed: incoming,
@@ -177,9 +181,15 @@ impl KeyFile {
 
     /// Put `new` on the key file, opened first with `with`: one of its own locks, or `None` for a
     /// plain file, which has none. A new lock of a method the file already holds replaces that lock,
-    /// which is how a passphrase is changed. Since `passphrase` is the only method, on a sealed file
-    /// this always replaces its one lock. The key, and so its public key, never changes, and neither does the
-    /// file key the locks wrap, so no other lock needs opening.
+    /// which is how a passphrase is changed; a lock of another method is added beside the others,
+    /// and any one of them opens the file. The key, and so its public key, never changes, and neither
+    /// does the file key the locks wrap, so no other lock needs opening.
+    ///
+    /// A root key keeps a lock that opens on another machine, so two changes to one refuse before
+    /// anything is read: sealing a plain root under a `touch-id` lock alone refuses as
+    /// [`Error::RootPassphrase`], and setting its passphrase lock through a `touch-id` lock refuses
+    /// as [`Error::RootPassphraseNeeded`]. Whoever holds only the touch cannot set the passphrase
+    /// that opens every copy of the root.
     ///
     /// In this order, and nothing reaches the next step until the last one held:
     ///
@@ -211,7 +221,11 @@ impl KeyFile {
     ///
     /// Given `None` for a sealed file, this refuses as [`Error::Sealed`]; given a lock the file does
     /// not hold, a plain file included, as [`Error::NoLock`].
+    ///
+    /// A new `touch-id` lock is made with nothing asked of anyone, and step 3 then opens the new form
+    /// through it, which asks for one touch.
     pub fn add_lock(&self, with: Option<Unlock<'_>>, new: NewLock<'_>) -> Result<(), Error> {
+        self.settable(with, new)?;
         let real = self.resolved()?;
         real.sweep();
         let (stored, seen) = real.load_present()?;
@@ -229,7 +243,7 @@ impl KeyFile {
                     .envelope()
                     .with_lock(&opened, new)
                     .map(Zeroizing::new)
-                    .map_err(|source| real.crypto(source))?;
+                    .map_err(|source| real.method_failed(source))?;
                 (image, opened.secret.public_key())
             }
         };
@@ -239,7 +253,13 @@ impl KeyFile {
     /// Take the lock of `method` off the key file, opened first with `with`, which may be that same
     /// lock. The key and the other locks stay as they are. Removing a device key's last
     /// lock writes it plain; a root key's passphrase lock is never removed, and asking refuses as
-    /// [`Error::RootPassphrase`] before anything is read.
+    /// [`Error::RootPassphrase`] before anything is unlocked.
+    ///
+    /// A removal never leaves a file that cannot open here: unless a lock that stays is the one
+    /// `with` opens, or can open on this machine, it refuses as [`Error::NoneOpensHere`] before
+    /// anything is unlocked. Removing a passphrase beside another Mac's `touch-id` lock is refused
+    /// that way. Whether a `touch-id` lock can open here is asked of the enclave without showing
+    /// anything.
     ///
     /// The same four steps, the same check that the file is unchanged before the rename, and the same
     /// handling of a symbolic link as [`add_lock`](Self::add_lock). A file with no lock of `method`,
@@ -248,7 +268,6 @@ impl KeyFile {
     /// Removing a lock stops it opening this file from here on. A copy made while the lock was on it
     /// (a backup) still opens with it.
     pub fn remove_lock(&self, with: Unlock<'_>, method: Method) -> Result<(), Error> {
-        self.removable(method)?;
         let real = self.resolved()?;
         real.sweep();
         let (stored, seen) = real.load_present()?;
@@ -258,6 +277,8 @@ impl KeyFile {
         if !locked.envelope().holds(method) {
             return Err(real.no_lock(method));
         }
+        real.removable(locked.envelope(), method)?;
+        real.leaves_one_here(locked.envelope(), with, method)?;
         let opened = locked.open(with)?;
         let public = opened.secret.public_key();
         let rewritten = locked
@@ -277,24 +298,74 @@ impl KeyFile {
         }
     }
 
-    /// Whether this file may be written under `protection`: anything but a plain root key.
+    /// Whether this file may be written under `protection`: anything but a plain root key, or a root
+    /// key whose only lock opens on this Mac alone.
     fn writable(&self, protection: Protection<'_>) -> Result<(), Error> {
         match (self.kind, protection) {
             (Kind::Root, Protection::Plain) => Err(Error::PlainRoot {
+                path: self.path.clone(),
+            }),
+            (Kind::Root, Protection::TouchId { .. }) => Err(Error::RootPassphrase {
                 path: self.path.clone(),
             }),
             (Kind::Root | Kind::Device, _) => Ok(()),
         }
     }
 
-    /// Whether this file's lock of `method` may be removed: anything but a root key's passphrase.
-    fn removable(&self, method: Method) -> Result<(), Error> {
-        match (self.kind, method) {
-            (Kind::Root, Method::Passphrase) => Err(Error::RootPassphrase {
+    /// Whether `new` may be put on this file through `with`. A device key takes any lock through any
+    /// of its own. A root key keeps a lock that opens on another machine: a plain root's first lock
+    /// must be one, and one is set only through one, so a lock that opens on this Mac alone never
+    /// sets the passphrase that opens every copy.
+    fn settable(&self, with: Option<Unlock<'_>>, new: NewLock<'_>) -> Result<(), Error> {
+        match (self.kind, with) {
+            (Kind::Device, _) => Ok(()),
+            (Kind::Root, None) if !new.method().portable() => Err(Error::RootPassphrase {
                 path: self.path.clone(),
             }),
-            (Kind::Device, Method::Passphrase) => Ok(()),
+            (Kind::Root, Some(with)) if new.method().portable() && !with.method().portable() => {
+                Err(Error::RootPassphraseNeeded {
+                    path: self.path.clone(),
+                })
+            }
+            (Kind::Root, _) => Ok(()),
         }
+    }
+
+    /// Whether this file's lock of `method` may be removed: on a root key, only while another lock
+    /// that opens on another machine stays.
+    fn removable(&self, envelope: &Envelope, method: Method) -> Result<(), Error> {
+        let keeps_portable = envelope
+            .methods()
+            .any(|kept| kept != method && kept.portable());
+        match self.kind {
+            Kind::Root if !keeps_portable => Err(Error::RootPassphrase {
+                path: self.path.clone(),
+            }),
+            Kind::Root | Kind::Device => Ok(()),
+        }
+    }
+
+    /// Whether removing the lock of `method` leaves the file openable on this machine: no lock stays
+    /// (the file is written plain), the lock `with` opens stays, or a lock that stays can open here.
+    /// Never only another Mac's `touch-id` lock, which this machine cannot open.
+    fn leaves_one_here(
+        &self,
+        envelope: &Envelope,
+        with: Unlock<'_>,
+        method: Method,
+    ) -> Result<(), Error> {
+        let mut kept = envelope.methods().filter(|&kept| kept != method).peekable();
+        if kept.peek().is_none() || (with.method() != method && envelope.holds(with.method())) {
+            return Ok(());
+        }
+        // Only a lock known to open here counts: one that could not be checked now may be dead.
+        if kept.any(|kept| envelope.health(kept) == Some(Health::Live)) {
+            return Ok(());
+        }
+        Err(Error::NoneOpensHere {
+            path: self.path.clone(),
+            method,
+        })
     }
 
     /// This key file at the path it finally names, every symbolic link on the way resolved.
@@ -352,6 +423,7 @@ impl KeyFile {
             Protection::Passphrase(passphrase) => {
                 self.seal(secret, NewLock::Passphrase(passphrase))
             }
+            Protection::TouchId { reason } => self.seal(secret, NewLock::TouchId { reason }),
         }
     }
 
@@ -359,7 +431,7 @@ impl KeyFile {
     fn seal(&self, secret: &Secret, lock: NewLock<'_>) -> Result<Zeroizing<Vec<u8>>, Error> {
         Envelope::seal(secret, self.kind, lock)
             .map(Zeroizing::new)
-            .map_err(|source| self.crypto(source))
+            .map_err(|source| self.method_failed(source))
     }
 
     /// Read the file's bytes and fingerprint, or `None` when nothing is at the path.
@@ -532,6 +604,17 @@ impl KeyFile {
         }
     }
 
+    /// A lock's method that could not run, with this file's path attached.
+    fn method_failed(&self, source: MethodError) -> Error {
+        match source {
+            MethodError::Crypto(source) => self.crypto(source),
+            MethodError::TouchId(source) => Error::TouchId {
+                path: self.path.clone(),
+                source,
+            },
+        }
+    }
+
     fn no_lock(&self, method: Method) -> Error {
         Error::NoLock {
             path: self.path.clone(),
@@ -571,7 +654,18 @@ impl Staged<'_> {
         };
         let opened = match (staged.load(), proof) {
             (Ok(Some(Stored::Plain(secret))), Proof::Plain) => Some(secret),
-            (Ok(Some(Stored::Locked(locked))), Proof::Lock(with)) => locked.unlock(with).ok(),
+            (Ok(Some(Stored::Locked(locked))), Proof::Lock(with)) => match locked.unlock(with) {
+                Ok(secret) => Some(secret),
+                // A touch declined, or an enclave that failed, says nothing about the new form: it is
+                // reported as itself, and the original is left as it was.
+                Err(Error::TouchId { source, .. }) => {
+                    return Err(Error::TouchId {
+                        path: self.target.path.clone(),
+                        source,
+                    });
+                }
+                Err(_) => None,
+            },
             (Ok(Some(Stored::Locked(locked))), Proof::Opened(opened)) => {
                 locked.envelope().reopen(opened).ok()
             }
@@ -651,6 +745,7 @@ impl<'a> Proof<'a> {
         match protection {
             Protection::Plain => Self::Plain,
             Protection::Passphrase(passphrase) => Self::Lock(Unlock::Passphrase(passphrase)),
+            Protection::TouchId { reason } => Self::Lock(Unlock::TouchId { reason }),
         }
     }
 }

@@ -24,7 +24,8 @@
 //! unknown value is refused by name, never guessed at. Each lock's own layout is in `lock`.
 //!
 //! A file holds at most one lock per method, so the list is bounded by the methods this build knows,
-//! and every length in it is judged before the bytes it covers are read.
+//! and every length in it is judged before the bytes it covers are read. A root key's list always
+//! holds a lock that opens on another machine; one without is refused as it is read.
 //!
 //! The kind says what the key is FOR, and a file is only ever read as the kind its reader expects: a
 //! sealed device key presented where a root key belongs is refused by its kind, and so is the reverse.
@@ -33,12 +34,13 @@
 //! nothing else.
 
 use crate::cipher::{self, Failed, NONCE_LEN, SEALED_LEN};
-use crate::error::{CryptoError, FormatError};
+use crate::error::{CryptoError, FormatError, MethodError, TouchIdError};
 use crate::kind::Kind;
 use crate::lock::{FileKey, Lock};
 use crate::method::{Method, NewLock, Unlock};
 use crate::public_key::PublicKey;
 use crate::secret::{SEED_LEN, Secret};
+use crate::stored::Health;
 
 /// Every sealed key file opens with these bytes, at every version, forever.
 ///
@@ -141,6 +143,8 @@ pub(crate) struct Envelope {
 pub(crate) struct Opened {
     pub(crate) secret: Secret,
     file_key: FileKey,
+    /// The method of the lock that opened it, so a later refusal can say which input it doubts.
+    method: Method,
 }
 
 impl Opened {
@@ -185,8 +189,7 @@ impl Envelope {
         }
         // The count needs no bound of its own: each lock must name a method this build knows, and no
         // method twice, so a list longer than the methods refuses at its first extra lock, before
-        // anything past that lock's method byte is read. A root's passphrase lock needs no check here
-        // while the passphrase is the only method: any list of at least one known lock holds it.
+        // anything past that lock's method byte is read.
         let mut locks: Vec<Lock> = Vec::new();
         for _ in 0..count {
             let found = reader.byte()?;
@@ -197,13 +200,19 @@ impl Envelope {
                 return Err(FormatError::DuplicateLock { method });
             }
             let length = u16::from_be_bytes(reader.array()?);
-            if length != method.body_len() {
+            if !method.holds_body_of(length) {
                 return Err(FormatError::LockLength {
                     method,
                     found: length,
                 });
             }
             locks.push(Lock::parse(method, reader.take(usize::from(length))?)?);
+        }
+        // A root key keeps a lock that opens a copy of it on another machine, and this crate never
+        // writes one without. Said in those words rather than by naming a method, so a second lock
+        // that travels satisfies it the day it lands.
+        if expected == Kind::Root && !locks.iter().any(|lock| lock.method().portable()) {
+            return Err(FormatError::NoPortableLock);
         }
         let covered = reader.consumed().to_vec();
         let seed_nonce = reader.array()?;
@@ -227,17 +236,17 @@ impl Envelope {
         secret: &Secret,
         kind: Kind,
         lock: NewLock<'_>,
-    ) -> Result<Vec<u8>, CryptoError> {
+    ) -> Result<Vec<u8>, MethodError> {
         let file_key = FileKey::generate()?;
         let header = header(kind, secret.public_key());
         let lock = Lock::wrap(lock, &file_key, &header)?;
-        assemble(
+        Ok(assemble(
             &header,
             &[&lock],
             &file_key,
             secret,
             &cipher::fresh_nonce()?,
-        )
+        )?)
     }
 
     /// Open the file with `with`: its lock unwraps the file key, and the file key opens the seed. The
@@ -247,18 +256,23 @@ impl Envelope {
             return Err(Refusal::NoLock(with.method()));
         };
         let file_key = lock.open(with, &self.header)?;
-        let secret = self.open_with(&file_key)?;
-        Ok(Opened { secret, file_key })
+        let secret = self.open_with(&file_key, with.method())?;
+        Ok(Opened {
+            secret,
+            file_key,
+            method: with.method(),
+        })
     }
 
     /// Open the seed with the file key another unlock of this file's key already holds: how a lock
     /// removal proves its new form, since the lock that opened the old form may be the one removed.
     pub(crate) fn reopen(&self, opened: &Opened) -> Result<Secret, Refusal> {
-        self.open_with(&opened.file_key)
+        self.open_with(&opened.file_key, opened.method)
     }
 
-    /// Open the seed with a file key already in hand, and hold it to the header's public key.
-    fn open_with(&self, file_key: &FileKey) -> Result<Secret, Refusal> {
+    /// Open the seed with a file key already in hand, which the lock of `method` gave, and hold it to
+    /// the header's public key.
+    fn open_with(&self, file_key: &FileKey, method: Method) -> Result<Secret, Refusal> {
         let seed = match cipher::open(
             file_key.bytes(),
             &self.seed_nonce,
@@ -266,7 +280,7 @@ impl Envelope {
             &self.sealed_seed,
         ) {
             Ok(seed) => seed,
-            Err(Failed::Tag) => return Err(Refusal::Unlock),
+            Err(Failed::Tag) => return Err(Refusal::Unlock(method)),
             Err(Failed::Crypto(source)) => return Err(Refusal::Crypto(source)),
         };
         let secret = Secret::copy_of(&seed);
@@ -287,20 +301,20 @@ impl Envelope {
         &self,
         opened: &Opened,
         new: NewLock<'_>,
-    ) -> Result<Vec<u8>, CryptoError> {
+    ) -> Result<Vec<u8>, MethodError> {
         let new = Lock::wrap(new, &opened.file_key, &self.header)?;
         let mut locks: Vec<&Lock> = self.locks.iter().collect();
         match locks.iter().position(|lock| lock.method() == new.method()) {
             Some(at) => locks[at] = &new,
             None => locks.push(&new),
         }
-        assemble(
+        Ok(assemble(
             &self.header,
             &locks,
             &opened.file_key,
             &opened.secret,
             &cipher::fresh_nonce()?,
-        )
+        )?)
     }
 
     /// This file without its lock of `method`, or `None` when that is its last lock, and so nothing
@@ -338,6 +352,12 @@ impl Envelope {
         self.lock(method).is_some()
     }
 
+    /// Whether this file's lock of `method` can open it on this machine, asked without showing
+    /// anything; `None` when the file holds no such lock.
+    pub(crate) fn health(&self, method: Method) -> Option<Health> {
+        self.lock(method).map(Lock::health)
+    }
+
     fn lock(&self, method: Method) -> Option<&Lock> {
         self.locks.iter().find(|lock| lock.method() == method)
     }
@@ -351,12 +371,15 @@ impl Envelope {
 /// Why a parsed envelope did not unlock. The key file attaches its path to each.
 #[derive(Debug)]
 pub(crate) enum Refusal {
-    /// Wrong passphrase, or the file was damaged: deliberately one case.
-    Unlock,
+    /// The input did not open the lock of this method (for a passphrase: the wrong one), or the
+    /// file was damaged: deliberately one case.
+    Unlock(Method),
     /// The seal opened, but the header names a different key.
     Inconsistent,
     /// The file holds no lock of this method.
     NoLock(Method),
+    /// The `touch-id` lock did not give its key.
+    TouchId(TouchIdError),
     /// Unlocking could not run.
     Crypto(CryptoError),
 }

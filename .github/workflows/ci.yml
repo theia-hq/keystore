@@ -18,26 +18,44 @@ jobs:
       - name: lock guard
         run: sh scripts/lock-guard.sh .
       - name: build
-        run: cargo build --locked
+        run: cargo build --workspace --locked
       - name: test
-        run: cargo test --locked
+        run: cargo test --workspace --locked
       - name: clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: cargo-deny (sources)
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check sources
-  # The platform job: build and run every test on macOS, where the platform locks live, so a change
-  # that breaks there fails here and not on a user's Mac.
+  # The platform job: build, lint and run every test on macOS, where the platform locks live and the
+  # enclave crate compiles, so a change that breaks there fails here and not on a user's Mac. Its Macs
+  # are virtual and have no Secure Enclave, so the tests that need one are ignored and run by hand.
   macos:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - name: build
-        run: cargo build --locked
+        run: cargo build --workspace --locked
       - name: test
-        run: cargo test --locked
+        run: cargo test --workspace --locked
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      # The Mac crate and its Apple dependencies compile only here, so the oldest toolchain the
+      # manifest claims is checked against them here too, not only on Linux.
+      - name: read rust-version
+        id: msrv
+        run: |
+          v=$(sed -n 's/^rust-version *= *"\([^"]*\)".*/\1/p' Cargo.toml)
+          test -n "$v" || { echo "no rust-version in Cargo.toml"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - name: check at rust-version
+        run: cargo +${{ steps.msrv.outputs.version }} check --workspace --all-targets --locked
   # Check with the oldest toolchain the manifest claims (rust-version), so a dependency or a language
   # feature that needs a newer compiler fails here instead of in a user's build. The version is read from
   # Cargo.toml, so this job is the same in every repo.
@@ -55,7 +73,7 @@ jobs:
         with:
           toolchain: ${{ steps.msrv.outputs.version }}
       - name: check
-        run: cargo +${{ steps.msrv.outputs.version }} check --all-targets --locked
+        run: cargo +${{ steps.msrv.outputs.version }} check --workspace --all-targets --locked
   fmt:
     runs-on: ubuntu-latest
     steps:

@@ -1,8 +1,10 @@
 use zeroize::Zeroizing;
 
 use super::{Envelope, HEADER_LEN, Opened, Parsed, Refusal, SIGNATURE, assemble, header, parse};
-use crate::error::FormatError;
+use crate::error::{FormatError, TouchIdError};
 use crate::kind::Kind;
+use crate::lock::enclave::enclave_tests::{self as stand_in, Touch};
+use crate::lock::enclave::{EnclaveParams, Policy};
 use crate::lock::passphrase::{Cost, PassphraseParams};
 use crate::lock::{FileKey, Lock, Params};
 use crate::method::{Method, NewLock, Unlock};
@@ -334,7 +336,7 @@ fn a_device_key_relabelled_as_a_root_key_does_not_unlock() {
     let envelope = sealed_as(&relabelled, Kind::Root);
     assert!(matches!(
         open(&envelope, &golden_passphrase()),
-        Err(Refusal::Unlock)
+        Err(Refusal::Unlock(_))
     ));
 }
 
@@ -374,7 +376,7 @@ fn a_wrong_passphrase_and_a_damaged_file_are_one_refusal() {
 
     assert!(matches!(
         open(&sealed(&image), &passphrase("Correct horse battery staple")),
-        Err(Refusal::Unlock)
+        Err(Refusal::Unlock(_))
     ));
     // One flipped bit in every field the lock or the seed's seal authenticates. The Argon2id fields
     // flip to values still inside the bounds, so the damage reaches the cipher rather than the parser.
@@ -396,7 +398,7 @@ fn a_wrong_passphrase_and_a_damaged_file_are_one_refusal() {
         let mut damaged = image.clone();
         damaged[at] ^= bit;
         assert!(
-            matches!(open(&sealed(&damaged), &under), Err(Refusal::Unlock)),
+            matches!(open(&sealed(&damaged), &under), Err(Refusal::Unlock(_))),
             "a damaged {field} was not refused as a failed unlock"
         );
     }
@@ -419,7 +421,7 @@ fn any_edit_to_a_lock_fails_the_whole_file() {
         let mut edited = image.clone();
         edited[at] ^= 0x01;
         assert!(
-            matches!(open(&sealed(&edited), &under), Err(Refusal::Unlock)),
+            matches!(open(&sealed(&edited), &under), Err(Refusal::Unlock(_))),
             "an edit at byte {at} opened"
         );
     }
@@ -454,8 +456,7 @@ fn any_edit_to_a_lock_fails_the_whole_file() {
         panic!("the swapped-in lock does not open on its own");
     };
     assert_eq!(opened_key.bytes(), &golden_file_key());
-    assert!(matches!(open(&envelope, &under), Err(Refusal::Unlock)));
-    // Reordering needs two locks, and this build knows one method; the same seal covers their order.
+    assert!(matches!(open(&envelope, &under), Err(Refusal::Unlock(_))));
 }
 
 #[test]
@@ -563,8 +564,8 @@ fn only_registered_kinds_and_derivations_parse() {
 
 #[test]
 fn an_unknown_method_refuses_by_name() {
-    // Method 1 is the passphrase, and no other value is registered.
-    for found in [0, 2, 3, 255] {
+    // Method 1 is the passphrase, 2 is touch-id, and no other value is registered.
+    for found in [0, 3, 4, 255] {
         let mut image = GOLDEN;
         image[AT_METHOD] = found;
         assert_eq!(refusal(&image), FormatError::Method { found });
@@ -573,9 +574,9 @@ fn an_unknown_method_refuses_by_name() {
     // that lock, by its method, not by how many locks there are.
     let mut two = GOLDEN[..AT_SEED_NONCE].to_vec();
     two[HEADER_LEN] = 2;
-    two.extend_from_slice(&[2, 0, 4, 0xee, 0xee, 0xee, 0xee]);
+    two.extend_from_slice(&[3, 0, 4, 0xee, 0xee, 0xee, 0xee]);
     two.extend_from_slice(&GOLDEN[AT_SEED_NONCE..]);
-    assert_eq!(refusal(&two), FormatError::Method { found: 2 });
+    assert_eq!(refusal(&two), FormatError::Method { found: 3 });
 }
 
 #[test]
@@ -672,4 +673,336 @@ fn the_bounds_are_inclusive_and_hold_both_costs_this_crate_uses() {
     }
     assert_eq!(Cost::parse(19 * 1024, 2, 1), Ok(Cost::FLOOR));
     assert_eq!(Cost::parse(64 * 1024, 3, 1), Ok(Cost::DEFAULT));
+}
+
+/// A version 2 sealed device key file with two locks: [`GOLDEN`]'s passphrase lock, then a `touch-id`
+/// lock on the software stand-in for the enclave. Every other input is [`GOLDEN`]'s, so the passphrase
+/// record is byte for byte the one there; the seed's seal differs, because it covers both records.
+///
+/// Computed outside this crate from the layout in the module docs alone: P-256 written from SEC 1
+/// and checked against `openssl` for public keys and for ECDH, HKDF-SHA256 written from RFC 5869 and
+/// checked against its test case and against `openssl kdf HKDF`, and the cipher, Argon2id and the
+/// ed25519 key as for [`GOLDEN`]. That same computation reproduces [`GOLDEN`] byte for byte.
+///
+/// The `touch-id` lock's inputs: the stand-in enclave key's scalar `11 .. 30`, made on stand-in Mac 1,
+/// so its blob is `01` then that scalar; the one-time key's scalar `31 .. 50`; the lock's nonce
+/// `60 .. 77`; policy 1.
+#[rustfmt::skip]
+const GOLDEN_TOUCH_ID: [u8; 460] = [
+    0x4b, 0x45, 0x59, 0x53, 0x54, 0x4f, 0x52, 0x45, 0x02, 0x01, 0x03, 0xa1, 0x07, 0xbf, 0xf3, 0xce,
+    0x10, 0xbe, 0x1d, 0x70, 0xdd, 0x18, 0xe7, 0x4b, 0xc0, 0x99, 0x67, 0xe4, 0xd6, 0x30, 0x9b, 0xa5,
+    0x0d, 0x5f, 0x1d, 0xdc, 0x86, 0x64, 0x12, 0x55, 0x31, 0xb8, 0x02, 0x01, 0x00, 0x65, 0x01, 0x00,
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x01, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4,
+    0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf, 0xb0, 0xb1, 0xb2, 0xb3, 0xb4,
+    0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xbb, 0xbc, 0xbd, 0xbe, 0xbf, 0xc0, 0xc1, 0xc2, 0xc3, 0xc4,
+    0xc5, 0xc6, 0xc7, 0xe5, 0xf7, 0xd0, 0x48, 0x86, 0x4e, 0x47, 0xed, 0xa4, 0xde, 0x19, 0x26, 0xe2,
+    0xb5, 0xbd, 0x79, 0xf9, 0x35, 0x36, 0x75, 0xfe, 0xff, 0xfb, 0x76, 0x4a, 0x91, 0x33, 0x06, 0x6c,
+    0xea, 0xf9, 0x09, 0x01, 0xf2, 0x7f, 0xc2, 0x64, 0xfb, 0x71, 0x89, 0x90, 0x24, 0x3c, 0x70, 0xa8,
+    0xa0, 0x54, 0xaf, 0x02, 0x00, 0xee, 0x01, 0x04, 0x4c, 0x63, 0x36, 0xe3, 0xb8, 0xb3, 0xde, 0x77,
+    0x1b, 0x61, 0x3a, 0x1c, 0x7a, 0x17, 0x34, 0x83, 0x4c, 0xd6, 0x9c, 0x1a, 0x4f, 0x5f, 0xfe, 0xcb,
+    0x24, 0x0c, 0x63, 0xbc, 0x0d, 0xdb, 0x15, 0x74, 0xf6, 0x89, 0x6c, 0x5d, 0x14, 0xca, 0x44, 0xe0,
+    0x03, 0x77, 0x91, 0xc2, 0x30, 0x03, 0x33, 0x25, 0x9a, 0x71, 0xb9, 0x01, 0xe5, 0x25, 0x85, 0x75,
+    0xd1, 0x07, 0xe5, 0xb8, 0xac, 0x48, 0xb4, 0x24, 0x00, 0x21, 0x01, 0x11, 0x12, 0x13, 0x14, 0x15,
+    0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25,
+    0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30, 0x04, 0x0c, 0x7f, 0xcc, 0x32,
+    0x1c, 0x77, 0x11, 0x92, 0x03, 0xdb, 0xe7, 0x98, 0x64, 0x90, 0x7e, 0x4f, 0x0a, 0x01, 0x91, 0x77,
+    0x89, 0xde, 0xa2, 0xd4, 0x73, 0x15, 0x31, 0xa5, 0x2a, 0x22, 0xe2, 0xba, 0xc1, 0x76, 0x6d, 0x21,
+    0xe4, 0x61, 0x7d, 0x72, 0xfb, 0xbe, 0xf8, 0x7d, 0x6e, 0xdf, 0x2d, 0x8f, 0x80, 0xb5, 0x26, 0x95,
+    0x6e, 0x3c, 0x2c, 0x17, 0x01, 0xf1, 0x6b, 0x7f, 0x31, 0x15, 0x00, 0xc6, 0x60, 0x61, 0x62, 0x63,
+    0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x6b, 0x6c, 0x6d, 0x6e, 0x6f, 0x70, 0x71, 0x72, 0x73,
+    0x74, 0x75, 0x76, 0x77, 0x2b, 0x1c, 0x78, 0x66, 0x27, 0xd5, 0xe3, 0x9a, 0xdb, 0xea, 0x39, 0x14,
+    0xfb, 0x13, 0xaf, 0x04, 0x3d, 0xd3, 0xb8, 0x75, 0xde, 0xaf, 0x69, 0x03, 0x21, 0x4b, 0xa9, 0xb3,
+    0x15, 0x1c, 0x56, 0xb4, 0x03, 0x22, 0x4f, 0x27, 0x3f, 0x46, 0xb9, 0xf4, 0x4e, 0x3f, 0x82, 0xb5,
+    0x8f, 0x41, 0x97, 0xa3, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b,
+    0x4c, 0x4d, 0x4e, 0x4f, 0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x34, 0xd3, 0xd7, 0xcc,
+    0xaa, 0x6e, 0xbe, 0x13, 0xac, 0x6d, 0x53, 0xd7, 0x8c, 0xd5, 0xe5, 0xef, 0x7d, 0x3f, 0x91, 0xac,
+    0xf1, 0x4d, 0xac, 0x4f, 0xb1, 0x87, 0xfd, 0xaf, 0xf9, 0x2d, 0x82, 0xfc, 0xb6, 0x22, 0x1a, 0xa6,
+    0x8a, 0x70, 0xc6, 0x8a, 0x85, 0x08, 0xfe, 0x7c, 0xe4, 0xec, 0x28, 0xf9,
+];
+/// [`GOLDEN_TOUCH_ID`] with its `touch-id` lock alone, computed the same way.
+#[rustfmt::skip]
+const GOLDEN_TOUCH_ID_ALONE: [u8; 356] = [
+    0x4b, 0x45, 0x59, 0x53, 0x54, 0x4f, 0x52, 0x45, 0x02, 0x01, 0x03, 0xa1, 0x07, 0xbf, 0xf3, 0xce,
+    0x10, 0xbe, 0x1d, 0x70, 0xdd, 0x18, 0xe7, 0x4b, 0xc0, 0x99, 0x67, 0xe4, 0xd6, 0x30, 0x9b, 0xa5,
+    0x0d, 0x5f, 0x1d, 0xdc, 0x86, 0x64, 0x12, 0x55, 0x31, 0xb8, 0x01, 0x02, 0x00, 0xee, 0x01, 0x04,
+    0x4c, 0x63, 0x36, 0xe3, 0xb8, 0xb3, 0xde, 0x77, 0x1b, 0x61, 0x3a, 0x1c, 0x7a, 0x17, 0x34, 0x83,
+    0x4c, 0xd6, 0x9c, 0x1a, 0x4f, 0x5f, 0xfe, 0xcb, 0x24, 0x0c, 0x63, 0xbc, 0x0d, 0xdb, 0x15, 0x74,
+    0xf6, 0x89, 0x6c, 0x5d, 0x14, 0xca, 0x44, 0xe0, 0x03, 0x77, 0x91, 0xc2, 0x30, 0x03, 0x33, 0x25,
+    0x9a, 0x71, 0xb9, 0x01, 0xe5, 0x25, 0x85, 0x75, 0xd1, 0x07, 0xe5, 0xb8, 0xac, 0x48, 0xb4, 0x24,
+    0x00, 0x21, 0x01, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
+    0x1e, 0x1f, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d,
+    0x2e, 0x2f, 0x30, 0x04, 0x0c, 0x7f, 0xcc, 0x32, 0x1c, 0x77, 0x11, 0x92, 0x03, 0xdb, 0xe7, 0x98,
+    0x64, 0x90, 0x7e, 0x4f, 0x0a, 0x01, 0x91, 0x77, 0x89, 0xde, 0xa2, 0xd4, 0x73, 0x15, 0x31, 0xa5,
+    0x2a, 0x22, 0xe2, 0xba, 0xc1, 0x76, 0x6d, 0x21, 0xe4, 0x61, 0x7d, 0x72, 0xfb, 0xbe, 0xf8, 0x7d,
+    0x6e, 0xdf, 0x2d, 0x8f, 0x80, 0xb5, 0x26, 0x95, 0x6e, 0x3c, 0x2c, 0x17, 0x01, 0xf1, 0x6b, 0x7f,
+    0x31, 0x15, 0x00, 0xc6, 0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x6b,
+    0x6c, 0x6d, 0x6e, 0x6f, 0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x2b, 0x1c, 0x78, 0x66,
+    0x27, 0xd5, 0xe3, 0x9a, 0xdb, 0xea, 0x39, 0x14, 0xfb, 0x13, 0xaf, 0x04, 0x3d, 0xd3, 0xb8, 0x75,
+    0xde, 0xaf, 0x69, 0x03, 0x21, 0x4b, 0xa9, 0xb3, 0x15, 0x1c, 0x56, 0xb4, 0x03, 0x22, 0x4f, 0x27,
+    0x3f, 0x46, 0xb9, 0xf4, 0x4e, 0x3f, 0x82, 0xb5, 0x8f, 0x41, 0x97, 0xa3, 0x40, 0x41, 0x42, 0x43,
+    0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f, 0x50, 0x51, 0x52, 0x53,
+    0x54, 0x55, 0x56, 0x57, 0x34, 0xd3, 0xd7, 0xcc, 0xaa, 0x6e, 0xbe, 0x13, 0xac, 0x6d, 0x53, 0xd7,
+    0x8c, 0xd5, 0xe5, 0xef, 0x7d, 0x3f, 0x91, 0xac, 0xf1, 0x4d, 0xac, 0x4f, 0xb1, 0x87, 0xfd, 0xaf,
+    0xf9, 0x2d, 0x82, 0xfc, 0xc2, 0xce, 0x1b, 0xfd, 0x9d, 0x20, 0x33, 0xcb, 0x8f, 0x73, 0x06, 0x43,
+    0x2f, 0x5b, 0x29, 0x39,
+];
+
+// [`GOLDEN_TOUCH_ID`]'s offsets, from the layout: the passphrase record sits where it does in
+// [`GOLDEN`], and the `touch-id` record follows it, ahead of the seed's nonce.
+const AT_TOUCH_ID: usize = AT_SEED_NONCE;
+const AT_TOUCH_ID_LENGTH: usize = AT_TOUCH_ID + 1;
+const AT_TOUCH_ID_BLOB: usize = AT_TOUCH_ID + 3 + 68;
+const AT_TOUCH_ID_ONE_TIME: usize = AT_TOUCH_ID_BLOB + 33;
+const AT_TOUCH_ID_NONCE: usize = AT_TOUCH_ID_ONE_TIME + 65;
+const AT_TOUCH_ID_WRAPPED: usize = AT_TOUCH_ID_NONCE + 24;
+const AT_TOUCH_ID_SEED_NONCE: usize = AT_TOUCH_ID_WRAPPED + 48;
+
+fn golden_enclave_scalar() -> [u8; 32] {
+    core::array::from_fn(|at| 0x11 + at as u8)
+}
+
+fn golden_one_time_scalar() -> [u8; 32] {
+    core::array::from_fn(|at| 0x31 + at as u8)
+}
+
+fn golden_touch_id_nonce() -> [u8; 24] {
+    core::array::from_fn(|at| 0x60 + at as u8)
+}
+
+fn touch() -> Unlock<'static> {
+    Unlock::TouchId {
+        reason: "open the test key",
+    }
+}
+
+/// The golden `touch-id` lock, built by this crate's writer from the golden inputs, wrapping
+/// `file_key` for a file whose first bytes are `header`.
+fn touch_id_lock(file_key: &FileKey, header: &[u8; HEADER_LEN]) -> Lock {
+    let enclave_key = p256::SecretKey::from_slice(&golden_enclave_scalar()).unwrap();
+    let one_time = p256::SecretKey::from_slice(&golden_one_time_scalar()).unwrap();
+    let (params, kek) = EnclaveParams::enroll_with(
+        Policy::BiometryCurrentSet,
+        stand_in::blob(1, &golden_enclave_scalar()),
+        stand_in::point_of(&enclave_key),
+        &one_time,
+    )
+    .unwrap();
+    Lock::wrap_with(
+        Params::TouchId(params),
+        &kek,
+        file_key,
+        header,
+        golden_touch_id_nonce(),
+    )
+    .unwrap()
+}
+
+/// A file of `kind` built by this crate's writer, holding `locks` in order, each made by its
+/// builder from the golden inputs.
+fn build_with(kind: Kind, locks: &[fn(&FileKey, &[u8; HEADER_LEN]) -> Lock]) -> Vec<u8> {
+    let secret = Secret::copy_of(&golden_seed());
+    let file_key = FileKey::copy_of(&golden_file_key());
+    let header = header(kind, secret.public_key());
+    let locks: Vec<Lock> = locks.iter().map(|lock| lock(&file_key, &header)).collect();
+    let locks: Vec<&Lock> = locks.iter().collect();
+    assemble(&header, &locks, &file_key, &secret, &golden_seed_nonce()).unwrap()
+}
+
+fn golden_passphrase_lock(file_key: &FileKey, header: &[u8; HEADER_LEN]) -> Lock {
+    passphrase_lock(
+        &golden_passphrase(),
+        file_key,
+        header,
+        golden_cost(),
+        golden_salt(),
+    )
+}
+
+fn floor_passphrase_lock(file_key: &FileKey, header: &[u8; HEADER_LEN]) -> Lock {
+    passphrase_lock(
+        &golden_passphrase(),
+        file_key,
+        header,
+        Cost::FLOOR,
+        golden_salt(),
+    )
+}
+
+#[test]
+fn the_touch_id_golden_vector_opens_to_its_seed_through_either_lock() {
+    let envelope = sealed(&GOLDEN_TOUCH_ID);
+    assert_eq!(
+        envelope.methods().collect::<Vec<_>>(),
+        [Method::Passphrase, Method::TouchId]
+    );
+    for opened in [
+        envelope.unlock(touch()).unwrap(),
+        open(&envelope, &golden_passphrase()).unwrap(),
+    ] {
+        opened
+            .secret
+            .with_bytes(|seed| assert_eq!(seed, &golden_seed()));
+        assert_eq!(opened.file_key.bytes(), &golden_file_key());
+    }
+    assert_eq!(stand_in::touches(), 1);
+}
+
+#[test]
+fn this_build_writes_the_touch_id_golden_vectors_byte_for_byte() {
+    assert_eq!(
+        build_with(Kind::Device, &[golden_passphrase_lock, touch_id_lock]),
+        GOLDEN_TOUCH_ID
+    );
+    assert_eq!(
+        build_with(Kind::Device, &[touch_id_lock]),
+        GOLDEN_TOUCH_ID_ALONE
+    );
+    // The layout's offsets, read off the golden file.
+    assert_eq!(GOLDEN_TOUCH_ID[AT_TOUCH_ID], 2);
+    assert_eq!(
+        GOLDEN_TOUCH_ID[AT_TOUCH_ID_LENGTH..AT_TOUCH_ID_LENGTH + 2],
+        [0, 238]
+    );
+    assert_eq!(GOLDEN_TOUCH_ID[AT_TOUCH_ID_BLOB], 1);
+    assert_eq!(GOLDEN_TOUCH_ID[AT_TOUCH_ID_ONE_TIME], 0x04);
+    assert_eq!(
+        GOLDEN_TOUCH_ID[AT_TOUCH_ID_NONCE..AT_TOUCH_ID_WRAPPED],
+        golden_touch_id_nonce()
+    );
+    assert_eq!(
+        GOLDEN_TOUCH_ID[AT_TOUCH_ID_SEED_NONCE..AT_TOUCH_ID_SEED_NONCE + 24],
+        golden_seed_nonce()
+    );
+}
+
+#[test]
+fn a_touch_id_key_file_alone_opens_nothing() {
+    let envelope = sealed(&GOLDEN_TOUCH_ID_ALONE);
+    // No passphrase opens it: there is no lock for one.
+    assert!(matches!(
+        open(&envelope, &golden_passphrase()),
+        Err(Refusal::NoLock(Method::Passphrase))
+    ));
+    // A touch that is cancelled opens nothing, and nothing stands in for it.
+    stand_in::touch(Touch::Cancelled);
+    assert!(matches!(
+        envelope.unlock(touch()),
+        Err(Refusal::TouchId(TouchIdError::Declined(_)))
+    ));
+    // Nor does any touch on another Mac, which is never even asked for.
+    stand_in::touch(Touch::Matches);
+    stand_in::on_mac(2);
+    assert!(matches!(
+        envelope.unlock(touch()),
+        Err(Refusal::TouchId(TouchIdError::NotHere(_)))
+    ));
+    assert_eq!(stand_in::touches(), 1);
+    // Only a matching touch on the Mac that made it opens it.
+    stand_in::on_mac(1);
+    assert!(envelope.unlock(touch()).is_ok());
+}
+
+#[test]
+fn reordering_two_locks_fails_the_whole_file() {
+    let image = build_with(Kind::Device, &[floor_passphrase_lock, touch_id_lock]);
+    let envelope = sealed(&image);
+    assert!(envelope.unlock(touch()).is_ok());
+    assert!(open(&envelope, &golden_passphrase()).is_ok());
+
+    // The same two records, the other way round: each is a good lock, the list is a good list, and
+    // the file opens through neither, because the seed's seal covers the locks in their order.
+    let at_seed_nonce = image.len() - NONCE_LEN_AND_SEAL;
+    let passphrase_end = AT_METHOD + 3 + 101;
+    let reordered = [
+        &image[..AT_METHOD],
+        &image[passphrase_end..at_seed_nonce],
+        &image[AT_METHOD..passphrase_end],
+        &image[at_seed_nonce..],
+    ]
+    .concat();
+    let envelope = sealed(&reordered);
+    assert_eq!(
+        envelope.methods().collect::<Vec<_>>(),
+        [Method::TouchId, Method::Passphrase]
+    );
+    assert!(matches!(envelope.unlock(touch()), Err(Refusal::Unlock(_))));
+    assert!(matches!(
+        open(&envelope, &golden_passphrase()),
+        Err(Refusal::Unlock(_))
+    ));
+}
+
+/// The seed's nonce and its seal, which end every sealed file.
+const NONCE_LEN_AND_SEAL: usize = 24 + 48;
+
+#[test]
+fn any_edit_to_a_touch_id_lock_fails_the_whole_file() {
+    let image = build_with(Kind::Device, &[floor_passphrase_lock, touch_id_lock]);
+    // Every byte of the record: refused as it is read, or the touch does not open it.
+    for at in AT_TOUCH_ID..image.len() - NONCE_LEN_AND_SEAL {
+        let mut edited = image.clone();
+        edited[at] ^= 0x01;
+        let Ok(Parsed::Sealed(envelope)) = parse(&edited, Kind::Device) else {
+            continue;
+        };
+        assert!(
+            envelope.unlock(touch()).is_err(),
+            "an edit at byte {at} of the touch-id lock opened"
+        );
+    }
+    // And the passphrase, which the edit did not touch, does not open the file either: the seed's
+    // seal covers the other lock too.
+    for at in [
+        AT_TOUCH_ID_BLOB + 5,
+        AT_TOUCH_ID_ONE_TIME + 9,
+        AT_TOUCH_ID_WRAPPED + 3,
+    ] {
+        let mut edited = image.clone();
+        edited[at] ^= 0x01;
+        assert!(
+            matches!(
+                open(&sealed(&edited), &golden_passphrase()),
+                Err(Refusal::Unlock(_))
+            ),
+            "an edit at byte {at} left the passphrase opening the file"
+        );
+    }
+}
+
+#[test]
+fn a_root_without_a_passphrase_lock_is_refused() {
+    assert_eq!(
+        refusal_as(&build_with(Kind::Root, &[touch_id_lock]), Kind::Root),
+        FormatError::NoPortableLock
+    );
+    // With its passphrase lock beside it, in either place, the same root reads.
+    for locks in [
+        [
+            floor_passphrase_lock as fn(&FileKey, &[u8; HEADER_LEN]) -> Lock,
+            touch_id_lock,
+        ],
+        [touch_id_lock, floor_passphrase_lock],
+    ] {
+        sealed_as(&build_with(Kind::Root, &locks), Kind::Root);
+    }
+    // A device key keeps no such rule: this machine's key may hold the touch alone.
+    sealed(&GOLDEN_TOUCH_ID_ALONE);
+}
+
+#[test]
+fn a_touch_id_lock_length_past_the_cap_is_refused_before_reading() {
+    // 1229 is the longest a touch-id body can be: a blob of 1024 bytes. The file ends right after the
+    // length, so a refusal by length shows the length was judged before any body was read.
+    for found in [1230, 0x1000, u16::MAX, 0, 205] {
+        let mut image = GOLDEN_TOUCH_ID[..AT_TOUCH_ID_LENGTH + 2].to_vec();
+        image[HEADER_LEN] = 2;
+        image[AT_TOUCH_ID_LENGTH..].copy_from_slice(&found.to_be_bytes());
+        assert_eq!(
+            refusal(&image),
+            FormatError::LockLength {
+                method: Method::TouchId,
+                found
+            }
+        );
+    }
 }
