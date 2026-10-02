@@ -1131,7 +1131,7 @@ fn a_dead_touch_id_lock_is_told_without_a_touch() {
 
     assert_eq!(locked.health(Method::Passphrase), Some(Health::Live));
     assert_eq!(locked.health(Method::TouchId), Some(Health::Live));
-    // Another Mac's lock, and one ended by a change to the enrolled fingers, read as dead.
+    // Another Mac's lock, and one made under other enrolled fingers, read as dead.
     stand_in::on_mac(2);
     assert_eq!(locked.health(Method::TouchId), Some(Health::Dead));
     stand_in::on_mac(1);
