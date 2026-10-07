@@ -1258,3 +1258,46 @@ fn a_failed_touch_id_unlock_blames_no_passphrase() {
     ));
     assert!(error.to_string().ends_with(": the file is damaged"));
 }
+
+/// Prints the `touch-id` fixtures a consumer's tests read: key files whose header lists a `touch-id` lock,
+/// made on the software stand-in for the enclave (stand-in Mac 1), so its blob is a plain scalar and the
+/// lock opens nowhere but here. Each is printed with its seed and passphrase. Run once and copy the output:
+/// `cargo test --lib -- --ignored --nocapture prints_touch_id_fixtures`.
+#[test]
+#[ignore = "prints fixtures for a consumer; asserts nothing"]
+fn prints_touch_id_fixtures() {
+    const PASS: &str = "correct horse battery staple";
+    let reason = "make a fixture";
+    let print = |name: &str, seed: u8, file: &KeyFile| {
+        let bytes = fs::read(file.path()).unwrap();
+        println!("/// seed [{seed:#04x}; 32], passphrase {PASS:?} where it holds one");
+        println!("pub const {name}: [u8; {}] = [", bytes.len());
+        for row in bytes.chunks(16) {
+            let row: Vec<String> = row.iter().map(|byte| format!("{byte:#04x}")).collect();
+            println!("    {},", row.join(", "));
+        }
+        println!("];");
+    };
+    let under = passphrase(PASS);
+
+    let dir = TestDir::new();
+    let root = KeyFile::root(dir.path().join("root.key"));
+    root.write(&Secret::copy_of(&[0x21; 32]), Protection::Passphrase(&under))
+        .unwrap();
+    root.add_lock(Some(with(&under)), NewLock::TouchId { reason })
+        .unwrap();
+    print("ROOT_PASSPHRASE_AND_TOUCH_ID", 0x21, &root);
+
+    let alone = KeyFile::device(dir.path().join("alone"));
+    alone
+        .write(&Secret::copy_of(&[0x11; 32]), Protection::TouchId { reason })
+        .unwrap();
+    print("DEVICE_TOUCH_ID_ALONE", 0x11, &alone);
+
+    let both = KeyFile::device(dir.path().join("both"));
+    both.write(&Secret::copy_of(&[0x11; 32]), Protection::Passphrase(&under))
+        .unwrap();
+    both.add_lock(Some(with(&under)), NewLock::TouchId { reason })
+        .unwrap();
+    print("DEVICE_PASSPHRASE_AND_TOUCH_ID", 0x11, &both);
+}
