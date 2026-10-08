@@ -757,8 +757,8 @@ fn a_new_key_that_does_not_read_back_is_never_published() {
     assert!(dir.names().is_empty());
 }
 
-fn sealed_only_file(dir: &TestDir) -> KeyFile {
-    KeyFile::sealed(dir.join("sealed-only.key"))
+fn strict_file(dir: &TestDir) -> KeyFile {
+    KeyFile::strict(dir.join("strict.key"))
 }
 
 /// The same path, named as the other kind.
@@ -777,14 +777,14 @@ fn wrong_kind(outcome: Result<Option<Stored>, Error>) -> (Kind, Kind) {
 }
 
 #[test]
-fn a_sealed_only_key_is_written_sealed_as_the_sealed_only_kind() {
+fn a_strict_key_is_written_sealed_as_the_strict_kind() {
     let dir = TestDir::new();
-    let file = sealed_only_file(&dir);
+    let file = strict_file(&dir);
     let under = passphrase("correct horse battery staple");
     let secret = Secret::copy_of(&[4; 32]);
     file.write(&secret, Protection::Passphrase(&under)).unwrap();
 
-    assert_eq!(file.kind(), Kind::Sealed);
+    assert_eq!(file.kind(), Kind::Strict);
     assert_eq!(bytes(&file).len(), SEALED_LEN);
     assert_eq!(
         locked(&file).unlock(with(&under)).unwrap().public_key(),
@@ -792,25 +792,22 @@ fn a_sealed_only_key_is_written_sealed_as_the_sealed_only_kind() {
     );
     assert_eq!(
         wrong_kind(as_standard(&file).load()),
-        (Kind::Standard, Kind::Sealed)
+        (Kind::Standard, Kind::Strict)
     );
 }
 
 #[test]
-fn a_standard_key_file_in_the_sealed_only_slot_is_refused_by_kind() {
+fn a_standard_key_file_in_the_strict_slot_is_refused_by_kind() {
     let dir = TestDir::new();
     let under = passphrase("correct horse battery staple");
     let (standard, secret) = sealed_file(&dir, [4; 32], &under);
-    let sealed_only = KeyFile::sealed(standard.path());
+    let strict = KeyFile::strict(standard.path());
     let before = bytes(&standard);
 
-    assert_eq!(
-        wrong_kind(sealed_only.load()),
-        (Kind::Sealed, Kind::Standard)
-    );
+    assert_eq!(wrong_kind(strict.load()), (Kind::Strict, Kind::Standard));
     // Every other door refuses it for the same reason, and none of them changes it.
     assert!(matches!(
-        sealed_only.adopt(&secret, Protection::Passphrase(&under)),
+        strict.adopt(&secret, Protection::Passphrase(&under)),
         Err(Error::Format {
             source: FormatError::WrongKind { .. },
             ..
@@ -818,7 +815,7 @@ fn a_standard_key_file_in_the_sealed_only_slot_is_refused_by_kind() {
     ));
     let new = passphrase("a new passphrase for it");
     assert!(matches!(
-        sealed_only.add_lock(Some(with(&under)), lock(&new)),
+        strict.add_lock(Some(with(&under)), lock(&new)),
         Err(Error::Format {
             source: FormatError::WrongKind { .. },
             ..
@@ -828,36 +825,36 @@ fn a_standard_key_file_in_the_sealed_only_slot_is_refused_by_kind() {
 }
 
 #[test]
-fn a_plain_file_in_the_sealed_only_slot_loads_as_plain() {
+fn a_plain_file_in_the_strict_slot_loads_as_plain() {
     // A plain file carries no kind to refuse it by: it loads, and the caller decides what to do with
-    // a sealed-only key it finds unsealed.
+    // a strict key it finds unsealed.
     let dir = TestDir::new();
     let (standard, secret) = plain_file(&dir, [4; 32]);
-    let sealed_only = KeyFile::sealed(standard.path());
-    assert_eq!(plain(&sealed_only).public_key(), secret.public_key());
+    let strict = KeyFile::strict(standard.path());
+    assert_eq!(plain(&strict).public_key(), secret.public_key());
 }
 
 #[test]
-fn a_sealed_only_key_is_never_written_plain() {
+fn a_strict_key_is_never_written_plain() {
     let dir = TestDir::new();
-    let file = sealed_only_file(&dir);
+    let file = strict_file(&dir);
     let secret = Secret::copy_of(&[4; 32]);
 
     assert!(matches!(
         file.write(&secret, Protection::Plain),
-        Err(Error::PlainSealed { .. })
+        Err(Error::PlainStrict { .. })
     ));
     assert!(matches!(
         file.adopt(&secret, Protection::Plain),
-        Err(Error::PlainSealed { .. })
+        Err(Error::PlainStrict { .. })
     ));
     assert!(dir.names().is_empty());
 }
 
 #[test]
-fn a_sealed_only_keys_passphrase_lock_cannot_be_removed() {
+fn a_strict_keys_passphrase_lock_cannot_be_removed() {
     let dir = TestDir::new();
-    let file = sealed_only_file(&dir);
+    let file = strict_file(&dir);
     let under = passphrase("correct horse battery staple");
     let secret = Secret::copy_of(&[4; 32]);
     file.write(&secret, Protection::Passphrase(&under)).unwrap();
@@ -865,28 +862,28 @@ fn a_sealed_only_keys_passphrase_lock_cannot_be_removed() {
 
     assert!(matches!(
         file.remove_lock(with(&under), Method::Passphrase),
-        Err(Error::SealedPassphrase { .. })
+        Err(Error::StrictPassphrase { .. })
     ));
     // Refused before anything is read: not even a wrong passphrase gets as far as an unlock.
     assert!(matches!(
         file.remove_lock(with(&passphrase("wrong")), Method::Passphrase),
-        Err(Error::SealedPassphrase { .. })
+        Err(Error::StrictPassphrase { .. })
     ));
     assert_eq!(bytes(&file), sealed);
-    assert_eq!(dir.names(), ["sealed-only.key"]);
+    assert_eq!(dir.names(), ["strict.key"]);
 }
 
 #[test]
-fn a_sealed_only_key_stays_a_sealed_only_key_through_every_lock_change() {
+fn a_strict_key_stays_a_strict_key_through_every_lock_change() {
     let dir = TestDir::new();
     let under = passphrase("correct horse battery staple");
     let new = passphrase("a new passphrase for it");
-    // A plain file found in the sealed-only slot, locked: it becomes a sealed-only key, not a
+    // A plain file found in the strict slot, locked: it becomes a strict key, not a
     // standard key.
     let (standard, secret) = plain_file(&dir, [4; 32]);
-    let file = KeyFile::sealed(standard.path());
+    let file = KeyFile::strict(standard.path());
     file.add_lock(None, lock(&under)).unwrap();
-    assert_eq!(wrong_kind(standard.load()), (Kind::Standard, Kind::Sealed));
+    assert_eq!(wrong_kind(standard.load()), (Kind::Standard, Kind::Strict));
 
     // And a new passphrase keeps it one.
     file.add_lock(Some(with(&under)), lock(&new)).unwrap();
@@ -894,7 +891,7 @@ fn a_sealed_only_key_stays_a_sealed_only_key_through_every_lock_change() {
         locked(&file).unlock(with(&new)).unwrap().public_key(),
         secret.public_key()
     );
-    assert_eq!(wrong_kind(standard.load()), (Kind::Standard, Kind::Sealed));
+    assert_eq!(wrong_kind(standard.load()), (Kind::Standard, Kind::Strict));
 }
 
 #[cfg(unix)]
@@ -920,9 +917,9 @@ fn touch_lock() -> NewLock<'static> {
     }
 }
 
-/// A sealed sealed-only key under `under`, with a `touch-id` lock added through it.
-fn sealed_only_with_touch_id(dir: &TestDir, under: &Passphrase) -> (KeyFile, Secret) {
-    let file = sealed_only_file(dir);
+/// A sealed strict key under `under`, with a `touch-id` lock added through it.
+fn strict_with_touch_id(dir: &TestDir, under: &Passphrase) -> (KeyFile, Secret) {
+    let file = strict_file(dir);
     let secret = Secret::copy_of(&[4; 32]);
     file.write(&secret, Protection::Passphrase(under)).unwrap();
     file.add_lock(Some(with(under)), touch_lock()).unwrap();
@@ -953,17 +950,17 @@ fn a_touch_id_lock_is_added_beside_the_passphrase_and_either_opens() {
 }
 
 #[test]
-fn a_touch_cannot_set_a_sealed_only_keys_passphrase() {
+fn a_touch_cannot_set_a_strict_keys_passphrase() {
     let dir = TestDir::new();
     let under = passphrase("correct horse battery staple");
-    let (file, secret) = sealed_only_with_touch_id(&dir, &under);
+    let (file, secret) = strict_with_touch_id(&dir, &under);
     let before = bytes(&file);
     let asked = stand_in::touches();
 
     let new = passphrase("a passphrase set by whoever holds the touch");
     assert!(matches!(
         file.add_lock(Some(touch()), lock(&new)),
-        Err(Error::SealedPassphraseNeeded { .. })
+        Err(Error::StrictPassphraseNeeded { .. })
     ));
     // Refused before anything is opened: no touch was even asked for.
     assert_eq!(stand_in::touches(), asked);
@@ -982,29 +979,29 @@ fn a_touch_cannot_set_a_sealed_only_keys_passphrase() {
 }
 
 #[test]
-fn a_plain_sealed_only_key_is_never_sealed_under_a_touch_alone() {
+fn a_plain_strict_key_is_never_sealed_under_a_touch_alone() {
     let dir = TestDir::new();
     let (standard, _) = plain_file(&dir, [4; 32]);
-    let file = KeyFile::sealed(standard.path());
+    let file = KeyFile::strict(standard.path());
 
     assert!(matches!(
         file.add_lock(None, touch_lock()),
-        Err(Error::SealedPassphrase { .. })
+        Err(Error::StrictPassphrase { .. })
     ));
     assert_eq!(bytes(&file), [4; 32]);
     assert_eq!(stand_in::touches(), 0);
 }
 
 #[test]
-fn a_sealed_only_keys_touch_id_lock_comes_off_and_its_passphrase_stays() {
+fn a_strict_keys_touch_id_lock_comes_off_and_its_passphrase_stays() {
     let dir = TestDir::new();
     let under = passphrase("correct horse battery staple");
-    let (file, _) = sealed_only_with_touch_id(&dir, &under);
+    let (file, _) = strict_with_touch_id(&dir, &under);
 
     // The touch cannot take the passphrase off, any more than the passphrase can.
     assert!(matches!(
         file.remove_lock(touch(), Method::Passphrase),
-        Err(Error::SealedPassphrase { .. })
+        Err(Error::StrictPassphrase { .. })
     ));
     file.remove_lock(touch(), Method::TouchId).unwrap();
     assert_eq!(
@@ -1113,14 +1110,14 @@ fn one_context_opens_one_key() {
     let under = passphrase("correct horse battery staple");
     let (standard, _) = sealed_file(&dir, [6; 32], &under);
     standard.add_lock(Some(with(&under)), touch_lock()).unwrap();
-    let (sealed_only, _) = sealed_only_with_touch_id(&dir, &under);
-    let (standard, sealed_only) = (locked(&standard), locked(&sealed_only));
+    let (strict, _) = strict_with_touch_id(&dir, &under);
+    let (standard, strict) = (locked(&standard), locked(&strict));
     let asked = stand_in::touches();
 
     // Each open asks for its own touch: none is kept for the next open, or lent to the other key.
     standard.unlock(touch()).unwrap();
     assert_eq!(stand_in::touches(), asked + 1);
-    sealed_only.unlock(touch()).unwrap();
+    strict.unlock(touch()).unwrap();
     assert_eq!(stand_in::touches(), asked + 2);
     standard.unlock(touch()).unwrap();
     assert_eq!(stand_in::touches(), asked + 3);
@@ -1258,9 +1255,9 @@ fn every_touch_is_asked_with_the_wait_its_caller_gave() {
 }
 
 #[test]
-fn a_sealed_only_key_is_never_written_under_touch_id_alone() {
+fn a_strict_key_is_never_written_under_touch_id_alone() {
     let dir = TestDir::new();
-    let file = sealed_only_file(&dir);
+    let file = strict_file(&dir);
     assert!(matches!(
         file.write(
             &Secret::copy_of(&[4; 32]),
@@ -1269,7 +1266,7 @@ fn a_sealed_only_key_is_never_written_under_touch_id_alone() {
                 wait: WAIT,
             }
         ),
-        Err(Error::SealedPassphrase { .. })
+        Err(Error::StrictPassphrase { .. })
     ));
     assert!(dir.names().is_empty());
     assert_eq!(stand_in::touches(), 0);
@@ -1357,17 +1354,17 @@ fn prints_touch_id_fixtures() {
     let under = passphrase(PASS);
 
     let dir = TestDir::new();
-    let sealed_only = KeyFile::sealed(dir.path().join("sealed-only.key"));
-    sealed_only
+    let strict = KeyFile::strict(dir.path().join("strict.key"));
+    strict
         .write(
             &Secret::copy_of(&[0x21; 32]),
             Protection::Passphrase(&under),
         )
         .unwrap();
-    sealed_only
+    strict
         .add_lock(Some(with(&under)), NewLock::TouchId { reason, wait: WAIT })
         .unwrap();
-    print("SEALED_ONLY_PASSPHRASE_AND_TOUCH_ID", 0x21, &sealed_only);
+    print("STRICT_PASSPHRASE_AND_TOUCH_ID", 0x21, &strict);
 
     let alone = KeyFile::new(dir.path().join("alone"));
     alone

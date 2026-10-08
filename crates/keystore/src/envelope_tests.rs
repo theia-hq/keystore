@@ -39,11 +39,11 @@ const GOLDEN: [u8; 219] = [
     0x67, 0x93, 0x19, 0x21, 0x7c, 0x8d, 0x08, 0xaf, 0xc2, 0xb0, 0x87,
 ];
 
-/// [`GOLDEN`] sealed as a sealed-only key: the same inputs with the kind byte at 2, computed the
+/// [`GOLDEN`] sealed as a strict key: the same inputs with the kind byte at 2, computed the
 /// same way. The kind is in every byte the lock and the seed's seal authenticate, so the wrapped
 /// file key and both tags differ.
 #[rustfmt::skip]
-const GOLDEN_SEALED: [u8; 219] = [
+const GOLDEN_STRICT: [u8; 219] = [
     0x4b, 0x45, 0x59, 0x53, 0x54, 0x4f, 0x52, 0x45, 0x02, 0x02, 0x03, 0xa1, 0x07, 0xbf, 0xf3, 0xce,
     0x10, 0xbe, 0x1d, 0x70, 0xdd, 0x18, 0xe7, 0x4b, 0xc0, 0x99, 0x67, 0xe4, 0xd6, 0x30, 0x9b, 0xa5,
     0x0d, 0x5f, 0x1d, 0xdc, 0x86, 0x64, 0x12, 0x55, 0x31, 0xb8, 0x01, 0x01, 0x00, 0x65, 0x01, 0x00,
@@ -249,33 +249,33 @@ fn this_build_writes_the_golden_vector_byte_for_byte() {
 }
 
 #[test]
-fn the_golden_sealed_vector_opens_to_its_seed_only_as_a_sealed_only_key() {
-    let envelope = sealed_as(&GOLDEN_SEALED, Kind::Sealed);
+fn the_golden_strict_vector_opens_to_its_seed_only_as_a_strict_key() {
+    let envelope = sealed_as(&GOLDEN_STRICT, Kind::Strict);
     let opened = open(&envelope, &golden_passphrase()).unwrap();
     opened
         .secret
         .with_bytes(|seed| assert_eq!(seed, &golden_seed()));
     assert_eq!(
-        refusal_as(&GOLDEN_SEALED, Kind::Standard),
+        refusal_as(&GOLDEN_STRICT, Kind::Standard),
         FormatError::WrongKind {
             expected: Kind::Standard,
-            found: Kind::Sealed
+            found: Kind::Strict
         }
     );
 }
 
 #[test]
-fn this_build_writes_the_golden_sealed_vector_byte_for_byte() {
+fn this_build_writes_the_golden_strict_vector_byte_for_byte() {
     let secret = Secret::copy_of(&golden_seed());
     let image = build(
-        Kind::Sealed,
+        Kind::Strict,
         secret.public_key(),
         &secret,
         &golden_passphrase(),
         golden_cost(),
         golden_salt(),
     );
-    assert_eq!(image, GOLDEN_SEALED);
+    assert_eq!(image, GOLDEN_STRICT);
 }
 
 #[test]
@@ -300,7 +300,7 @@ fn a_decomposed_typing_of_the_passphrase_opens_the_nfc_golden_lock() {
 fn a_version_1_file_is_refused_as_version_1() {
     assert_eq!(refusal(&VERSION_1), FormatError::Version { found: 1 });
     assert_eq!(
-        refusal_as(&VERSION_1, Kind::Sealed),
+        refusal_as(&VERSION_1, Kind::Strict),
         FormatError::Version { found: 1 }
     );
 }
@@ -308,9 +308,9 @@ fn a_version_1_file_is_refused_as_version_1() {
 #[test]
 fn a_sealed_key_is_read_only_as_its_own_kind() {
     assert_eq!(
-        refusal_as(&GOLDEN, Kind::Sealed),
+        refusal_as(&GOLDEN, Kind::Strict),
         FormatError::WrongKind {
-            expected: Kind::Sealed,
+            expected: Kind::Strict,
             found: Kind::Standard
         }
     );
@@ -318,7 +318,7 @@ fn a_sealed_key_is_read_only_as_its_own_kind() {
 
 #[test]
 fn a_plain_seed_has_no_kind_to_refuse_it_by() {
-    for expected in [Kind::Standard, Kind::Sealed] {
+    for expected in [Kind::Standard, Kind::Strict] {
         assert!(matches!(
             parse(&[9; 32], expected),
             Ok(Parsed::Plain(seed)) if seed == &[9; 32]
@@ -327,13 +327,13 @@ fn a_plain_seed_has_no_kind_to_refuse_it_by() {
 }
 
 #[test]
-fn a_standard_key_relabelled_as_a_sealed_only_key_does_not_unlock() {
+fn a_standard_key_relabelled_as_a_strict_key_does_not_unlock() {
     // The kind byte is authenticated by the lock and by the seed's seal: rewriting it gets past the
     // parser, which reads it before anything is verified, and then fails the unlock rather than
-    // opening a standard key as a sealed-only key.
+    // opening a standard key as a strict key.
     let mut relabelled = GOLDEN;
     relabelled[9] = 2;
-    let envelope = sealed_as(&relabelled, Kind::Sealed);
+    let envelope = sealed_as(&relabelled, Kind::Strict);
     assert!(matches!(
         open(&envelope, &golden_passphrase()),
         Err(Refusal::Unlock(_))
@@ -548,7 +548,7 @@ fn a_header_that_does_not_match_the_seed_refuses_the_unlock() {
 
 #[test]
 fn only_registered_kinds_and_derivations_parse() {
-    // Kinds 1 and 2 are the standard and sealed-only keys; derivation 1 is Argon2id. No other value
+    // Kinds 1 and 2 are the standard and strict keys; derivation 1 is Argon2id. No other value
     // is registered, so a value reserved for the future cannot be carried by a file this build
     // accepts.
     for found in [0, 3, 255] {
@@ -568,11 +568,11 @@ fn each_kind_is_the_byte_it_always_was() {
     // The kind byte is format, not a name: whatever the variants are called, each reads and writes
     // the byte below, and the golden files carry it, so a file keeps the kind it was written as.
     assert_eq!(Kind::Standard.byte(), 1);
-    assert_eq!(Kind::Sealed.byte(), 2);
+    assert_eq!(Kind::Strict.byte(), 2);
     assert_eq!(Kind::of_byte(1), Some(Kind::Standard));
-    assert_eq!(Kind::of_byte(2), Some(Kind::Sealed));
+    assert_eq!(Kind::of_byte(2), Some(Kind::Strict));
     assert_eq!(GOLDEN[9], 1);
-    assert_eq!(GOLDEN_SEALED[9], 2);
+    assert_eq!(GOLDEN_STRICT[9], 2);
 }
 
 #[test]
@@ -985,9 +985,9 @@ fn any_edit_to_a_touch_id_lock_fails_the_whole_file() {
 }
 
 #[test]
-fn a_sealed_only_key_without_a_passphrase_lock_is_refused() {
+fn a_strict_key_without_a_passphrase_lock_is_refused() {
     assert_eq!(
-        refusal_as(&build_with(Kind::Sealed, &[touch_id_lock]), Kind::Sealed),
+        refusal_as(&build_with(Kind::Strict, &[touch_id_lock]), Kind::Strict),
         FormatError::NoPortableLock
     );
     // With its passphrase lock beside it, in either place, the same key reads.
@@ -998,7 +998,7 @@ fn a_sealed_only_key_without_a_passphrase_lock_is_refused() {
         ],
         [touch_id_lock, floor_passphrase_lock],
     ] {
-        sealed_as(&build_with(Kind::Sealed, &locks), Kind::Sealed);
+        sealed_as(&build_with(Kind::Strict, &locks), Kind::Strict);
     }
     // A standard key keeps no such rule: this machine's key may hold the touch alone.
     sealed(&GOLDEN_TOUCH_ID_ALONE);

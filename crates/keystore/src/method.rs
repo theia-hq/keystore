@@ -26,7 +26,7 @@ pub enum Method {
 
 impl Method {
     /// Whether this lock opens a copy of the file on another machine. A passphrase does; a
-    /// `touch-id` lock opens only on the Mac whose enclave made it. A sealed-only key always keeps
+    /// `touch-id` lock opens only on the Mac whose enclave made it. A strict key always keeps
     /// one lock that does.
     pub const fn portable(self) -> bool {
         match self {

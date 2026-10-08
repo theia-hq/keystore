@@ -24,5 +24,16 @@ fn a_dependent_builds_each_enclave_failure_with_its_cause() {
         .map(|error| error.source().map(ToString::to_string).unwrap_or_default())
         .collect();
     assert_eq!(causes, ["not here", "declined", "timed out", "failed"]);
-    assert!(matches!(built[2], TouchIdError::TimedOut(_)));
+    // What a dependent shows for each: the variant's own words, never the made-up cause.
+    let shown: Vec<String> = built.iter().map(ToString::to_string).collect();
+    assert_eq!(
+        shown,
+        [
+            "the lock does not open on this Mac now; if a fingerprint was added after the lock was \
+             made, remove it and the lock opens again",
+            "the touch was cancelled or did not match",
+            "no touch came in time",
+            "the Secure Enclave failed",
+        ]
+    );
 }

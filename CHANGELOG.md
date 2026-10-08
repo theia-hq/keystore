@@ -8,10 +8,9 @@ All notable changes to keystore, newest first.
 
 - **The two kinds of key file are named for what they allow.** `KeyFile::device` is now
   `KeyFile::new` (plain or sealed, as its owner chooses) and `KeyFile::root` is now
-  `KeyFile::sealed` (every write sealed, its passphrase lock kept). `Kind::Device` and `Kind::Root`
-  are `Kind::Standard` and `Kind::Sealed`; `Error::PlainRoot` and `Error::RootPassphrase` are
-  `Error::PlainSealed` and `Error::SealedPassphrase`. The kind byte on disk is unchanged, so every
-  file reads as the kind it was written as.
+  `KeyFile::strict` (always sealed, never without its passphrase lock). `Kind::Device` and
+  `Kind::Root` are now `Kind::Standard` and `Kind::Strict`, and `Error::PlainRoot` and
+  `Error::RootPassphrase` are now `Error::PlainStrict` and `Error::StrictPassphrase`.
 - **`Method`, `Unlock`, `NewLock` and `Protection` gain `TouchId`.** An exhaustive match on them needs
   the new arm. `Unlock::TouchId`, `NewLock::TouchId` and `Protection::TouchId` carry a `wait`: how long
   the Touch ID dialog stays up.
@@ -27,13 +26,13 @@ All notable changes to keystore, newest first.
   lock method `2`.
 - **A Touch ID dialog closes itself when its wait runs out.** The call then fails as
   `TouchIdError::TimedOut`, never `Declined`: nobody said no.
-- **A sealed-only key always keeps its passphrase lock.** A sealed-only key without one is refused as
-  it is read (`FormatError::NoPortableLock`), and its passphrase changes only when the file is opened
-  with it (`Error::SealedPassphraseNeeded`).
+- **A strict key always keeps its passphrase lock.** A strict key file without one is refused as it
+  is read (`FormatError::NoPortableLock`), and its passphrase changes only when the file is opened
+  with it (`Error::StrictPassphraseNeeded`).
 - **A removal keeps a lock that opens here.** Removing a lock is refused when locks are left, none
   of them opened the file, and none is known to open on this machine (`Error::NoneOpensHere`).
-- **`EnclaveError::new`, public on every target.** A dependent builds each `TouchIdError` that
-  carries the enclave's cause (`NotHere`, `Declined`, `TimedOut`, `Enclave`) in its own tests.
+- **`EnclaveError::new`, public on every target.** A dependent can build, in its own tests, each
+  `TouchIdError` that carries an enclave cause (`NotHere`, `Declined`, `TimedOut`, `Enclave`).
 - **`keystore-enclave`**, the Secure Enclave calls behind `touch-id`, as a crate of its own.
   `Key::agree` takes the wait, closes its dialog when it runs out, and fails as `Error::TimedOut`.
   macOS only; empty on every other target.

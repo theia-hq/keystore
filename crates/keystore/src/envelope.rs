@@ -11,7 +11,7 @@
 //! | ------ | --- | ---------------------------------------------------------------- |
 //! | 0      | 8   | signature `KEYSTORE`                                             |
 //! | 8      | 1   | format version, `2`                                              |
-//! | 9      | 1   | file kind, `1` = a standard key, `2` = a sealed-only key         |
+//! | 9      | 1   | file kind, `1` = a standard key, `2` = a strict key              |
 //! | 10     | 32  | the seed's ed25519 public key, so a locked file names its key    |
 //! | 42     | 1   | lock count `n`, at least 1                                       |
 //! | 43     | ..  | `n` locks, each: method (1), body length (2), body               |
@@ -24,11 +24,11 @@
 //! unknown value is refused by name, never guessed at. Each lock's own layout is in `lock`.
 //!
 //! A file holds at most one lock per method, so the list is bounded by the methods this build
-//! knows, and every length in it is judged before the bytes it covers are read. A sealed-only key's
+//! knows, and every length in it is judged before the bytes it covers are read. A strict key's
 //! list always holds a lock that opens on another machine; one without is refused as it is read.
 //!
 //! The kind says how the key may be written, and a file is only ever read as the kind its reader
-//! expects: a sealed standard key presented where a sealed-only key belongs is refused by its kind,
+//! expects: a sealed standard key presented where a strict key belongs is refused by its kind,
 //! and so is the reverse. Both kinds carry an ed25519 seed under the same layout; only the byte,
 //! which every seal authenticates, tells them apart. A plain file has no header and so no kind: it
 //! is the seed and nothing else.
@@ -58,17 +58,17 @@ const VERSION: u8 = 2;
 /// copy that was already verified. An artifact that is NOT a key file takes a new kind, so it can
 /// never be mistaken for one.
 const KIND_STANDARD: u8 = 1;
-/// File kind: a sealed-only key, never written plain and never without its passphrase lock. The
+/// File kind: a strict key, never written plain and never without its passphrase lock. The
 /// same layout as a standard key, told apart by this byte alone, so neither can be read in the
 /// other's place.
-const KIND_SEALED: u8 = 2;
+const KIND_STRICT: u8 = 2;
 
 impl Kind {
     /// The byte this kind is recorded as.
     const fn byte(self) -> u8 {
         match self {
             Self::Standard => KIND_STANDARD,
-            Self::Sealed => KIND_SEALED,
+            Self::Strict => KIND_STRICT,
         }
     }
 
@@ -76,7 +76,7 @@ impl Kind {
     const fn of_byte(byte: u8) -> Option<Self> {
         match byte {
             KIND_STANDARD => Some(Self::Standard),
-            KIND_SEALED => Some(Self::Sealed),
+            KIND_STRICT => Some(Self::Strict),
             _ => None,
         }
     }
@@ -210,10 +210,10 @@ impl Envelope {
             }
             locks.push(Lock::parse(method, reader.take(usize::from(length))?)?);
         }
-        // A sealed-only key keeps a lock that opens a copy of it on another machine, and this crate
+        // A strict key keeps a lock that opens a copy of it on another machine, and this crate
         // never writes one without. Said in those words rather than by naming a method, so a second
         // lock that travels satisfies it the day it lands.
-        if expected == Kind::Sealed && !locks.iter().any(|lock| lock.method().portable()) {
+        if expected == Kind::Strict && !locks.iter().any(|lock| lock.method().portable()) {
             return Err(FormatError::NoPortableLock);
         }
         let covered = reader.consumed().to_vec();

@@ -156,8 +156,9 @@ fn the_storage_core_depends_on_registry_crates_only() {
 fn the_storage_code_never_names_posture_home_prompting_or_signing() {
     // The words of the concerns that belong to the caller: where a key lives and whether one is made
     // (home, posture, intent, mint, ephemeral), how a person is asked (prompt, tty, stdin, env), and
-    // what the key is for (any signing surface). A storage core that needs one of these is growing a
-    // concern it must not own.
+    // what the key is for (any signing surface, or a role a caller gives a key). A storage core that
+    // needs one of these is growing a concern it must not own. Lowercase `root` stays allowed: it is
+    // the superuser a file's owner may be.
     const FORBIDDEN: &[&str] = &[
         "Home",
         "home",
@@ -182,6 +183,10 @@ fn the_storage_code_never_names_posture_home_prompting_or_signing() {
         "Signer",
         "Signature",
         "SigningKey",
+        "Root",
+        "ROOT",
+        "Device",
+        "DEVICE",
     ];
     for (name, source) in shipped_sources() {
         let code = code_only(&source);

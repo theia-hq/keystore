@@ -1,16 +1,16 @@
 //! Storage for one secret key: one [`Secret`], one versioned file format, and the codecs that
 //! load, write, adopt, and lock a key file.
 //!
-//! A key file holds one ed25519 seed of one [`Kind`]. The kind says how the key may be written,
-//! plain or sealed as its owner chooses or only ever sealed, and is chosen by naming the file
-//! ([`KeyFile::new`], [`KeyFile::sealed`]); a sealed file of the other kind is refused, and a
-//! sealed-only key is never written plain. A file is plain, the raw 32-byte seed, or sealed: a
-//! random file key seals the seed, and a lock wraps that file key. The format holds a list of
-//! locks, at most one per [`Method`], and any one opens the file. The methods are `passphrase` and
-//! `touch-id`, a key in a Mac's Secure Enclave that opens with a touch. A `touch-id` lock opens
-//! only on the Mac that made it, so a sealed-only key always keeps its passphrase lock, the one
-//! that opens a copy of the file anywhere. A build for another platform reads and keeps a
-//! `touch-id` lock, and opens the file with another lock.
+//! A key file holds one ed25519 seed of one [`Kind`]. The kind says how the key may be kept, plain
+//! or sealed as its owner chooses or always sealed, and is chosen by naming the file
+//! ([`KeyFile::new`], [`KeyFile::strict`]); a sealed file of the other kind is refused, and a strict
+//! key is never written plain. A file is plain, the raw 32-byte seed, or sealed: a random file key
+//! seals the seed, and a lock wraps that file key. The format holds a list of locks, at most one per
+//! [`Method`], and any one opens the file. The methods are `passphrase` and `touch-id`, a key in a
+//! Mac's Secure Enclave that opens with a touch. A `touch-id` lock opens only on the Mac that made
+//! it, so a strict key always keeps its passphrase lock, the one that opens a copy of the file
+//! anywhere. A build for another platform reads and keeps a `touch-id` lock, and opens the file
+//! with another lock.
 //!
 //! The locks are a property of the FILE. They are read from the file's own bytes, never from
 //! configuration, and they change only when [`KeyFile::add_lock`] or [`KeyFile::remove_lock`]
@@ -49,6 +49,11 @@ pub use passphrase::{Passphrase, PassphraseError};
 pub use public_key::PublicKey;
 pub use secret::Secret;
 pub use stored::{Health, Locked, Stored};
+
+// The README's example, compiled as a doctest, so the copy a reader takes builds.
+#[cfg(doctest)]
+#[doc = include_str!("../../../README.md")]
+pub struct ReadmeDoctests;
 
 #[cfg(test)]
 mod test_dir;
