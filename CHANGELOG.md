@@ -7,7 +7,8 @@ All notable changes to keystore, newest first.
 ### Breaking
 
 - **`Method`, `Unlock`, `NewLock` and `Protection` gain `TouchId`.** An exhaustive match on them needs
-  the new arm.
+  the new arm. `Unlock::TouchId`, `NewLock::TouchId` and `Protection::TouchId` carry a `wait`: how long
+  the Touch ID dialog stays up.
 
 ### New
 
@@ -18,13 +19,16 @@ All notable changes to keystore, newest first.
   opens with it. `Locked::health` says, with no dialog, whether a lock opens on this machine now:
   `Live`, `Dead`, or `Unchecked` when the enclave cannot say (a locked screen, a lockout). Format:
   lock method `2`.
+- **A Touch ID dialog closes itself when its wait runs out.** The call then fails as
+  `TouchIdError::TimedOut`, never `Declined`: nobody said no.
 - **A root key always keeps its passphrase lock.** A sealed root without one is refused as it is read
   (`FormatError::NoPortableLock`), and its passphrase changes only when the file is opened with it
   (`Error::RootPassphraseNeeded`).
 - **A removal keeps a lock that opens here.** Removing a lock is refused when locks are left, none
   of them opened the file, and none is known to open on this machine (`Error::NoneOpensHere`).
-- **`keystore-enclave`**, the Secure Enclave calls behind `touch-id`, as a crate of its own. macOS
-  only; empty on every other target.
+- **`keystore-enclave`**, the Secure Enclave calls behind `touch-id`, as a crate of its own.
+  `Key::agree` takes the wait, closes its dialog when it runs out, and fails as `Error::TimedOut`.
+  macOS only; empty on every other target.
 
 ## v0.1.0
 

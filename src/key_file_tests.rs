@@ -1,3 +1,4 @@
+use core::time::Duration;
 use std::fs;
 
 use zeroize::Zeroizing;
@@ -6,7 +7,7 @@ use super::{KeyFile, Proof, lacks_hard_links};
 use crate::envelope::{AT_PUBLIC, Envelope, HEADER_LEN};
 use crate::error::{Error, FormatError, TouchIdError};
 use crate::kind::Kind;
-use crate::lock::enclave::enclave_tests::{self as stand_in, Touch};
+use crate::lock::enclave::enclave_tests::{self as stand_in, Touch, WAIT};
 use crate::method::{Method, NewLock, Protection, Unlock};
 use crate::passphrase::Passphrase;
 use crate::secret::Secret;
@@ -904,12 +905,14 @@ fn a_filesystem_without_hard_links_is_told_apart_from_a_denied_permission() {
 fn touch() -> Unlock<'static> {
     Unlock::TouchId {
         reason: "open the test key",
+        wait: WAIT,
     }
 }
 
 fn touch_lock() -> NewLock<'static> {
     NewLock::TouchId {
         reason: "check the new lock opens",
+        wait: WAIT,
     }
 }
 
@@ -1168,8 +1171,14 @@ fn a_new_key_is_written_sealed_under_touch_id_and_never_plain() {
     let file = key_file(&dir);
     let secret = Secret::copy_of(&[6; 32]);
 
-    file.write(&secret, Protection::TouchId { reason: "write it" })
-        .unwrap();
+    file.write(
+        &secret,
+        Protection::TouchId {
+            reason: "write it",
+            wait: WAIT,
+        },
+    )
+    .unwrap();
     // The proof of the staged file asked one touch; the file holds the touch-id lock alone.
     assert_eq!(stand_in::touches(), 1);
     let locked = locked(&file);
@@ -1182,9 +1191,66 @@ fn a_new_key_is_written_sealed_under_touch_id_and_never_plain() {
     assert_eq!(dir.names(), ["identity.key"]);
 
     // Adopting the same key proves the sealed file through a touch.
-    file.adopt(&secret, Protection::TouchId { reason: "adopt it" })
-        .unwrap();
+    file.adopt(
+        &secret,
+        Protection::TouchId {
+            reason: "adopt it",
+            wait: WAIT,
+        },
+    )
+    .unwrap();
     assert_eq!(stand_in::touches(), 3);
+}
+
+/// Each touch is asked with the wait its own caller gave, on every path to the enclave: a new file's
+/// proof, an adoption's, a lock added beside a passphrase, and an unlock. So each dialog is bounded
+/// by its own wait, never a share of one.
+#[test]
+fn every_touch_is_asked_with_the_wait_its_caller_gave() {
+    let dir = TestDir::new();
+    let file = key_file(&dir);
+    let secret = Secret::copy_of(&[9; 32]);
+    let wait = Duration::from_secs;
+
+    file.write(
+        &secret,
+        Protection::TouchId {
+            reason: "write it",
+            wait: wait(7),
+        },
+    )
+    .unwrap();
+    assert_eq!(stand_in::waited(), Some(wait(7)));
+    file.adopt(
+        &secret,
+        Protection::TouchId {
+            reason: "adopt it",
+            wait: wait(8),
+        },
+    )
+    .unwrap();
+    assert_eq!(stand_in::waited(), Some(wait(8)));
+    locked(&file)
+        .unlock(Unlock::TouchId {
+            reason: "open it",
+            wait: wait(9),
+        })
+        .unwrap();
+    assert_eq!(stand_in::waited(), Some(wait(9)));
+
+    let under = passphrase("correct horse battery staple");
+    let other = TestDir::new();
+    let (sealed, _) = sealed_file(&other, [10; 32], &under);
+    sealed
+        .add_lock(
+            Some(with(&under)),
+            NewLock::TouchId {
+                reason: "check the new lock opens",
+                wait: wait(11),
+            },
+        )
+        .unwrap();
+    assert_eq!(stand_in::waited(), Some(wait(11)));
 }
 
 #[test]
@@ -1194,7 +1260,10 @@ fn a_root_key_is_never_written_under_touch_id_alone() {
     assert!(matches!(
         file.write(
             &Secret::copy_of(&[4; 32]),
-            Protection::TouchId { reason: "write it" }
+            Protection::TouchId {
+                reason: "write it",
+                wait: WAIT,
+            }
         ),
         Err(Error::RootPassphrase { .. })
     ));
@@ -1238,7 +1307,10 @@ fn a_failed_touch_id_unlock_blames_no_passphrase() {
     let file = KeyFile::device(dir.join("touch.key"));
     file.write(
         &Secret::copy_of(&[7; 32]),
-        Protection::TouchId { reason: "write it" },
+        Protection::TouchId {
+            reason: "write it",
+            wait: WAIT,
+        },
     )
     .unwrap();
     let mut damaged = bytes(&file);
@@ -1282,22 +1354,31 @@ fn prints_touch_id_fixtures() {
 
     let dir = TestDir::new();
     let root = KeyFile::root(dir.path().join("root.key"));
-    root.write(&Secret::copy_of(&[0x21; 32]), Protection::Passphrase(&under))
-        .unwrap();
-    root.add_lock(Some(with(&under)), NewLock::TouchId { reason })
+    root.write(
+        &Secret::copy_of(&[0x21; 32]),
+        Protection::Passphrase(&under),
+    )
+    .unwrap();
+    root.add_lock(Some(with(&under)), NewLock::TouchId { reason, wait: WAIT })
         .unwrap();
     print("ROOT_PASSPHRASE_AND_TOUCH_ID", 0x21, &root);
 
     let alone = KeyFile::device(dir.path().join("alone"));
     alone
-        .write(&Secret::copy_of(&[0x11; 32]), Protection::TouchId { reason })
+        .write(
+            &Secret::copy_of(&[0x11; 32]),
+            Protection::TouchId { reason, wait: WAIT },
+        )
         .unwrap();
     print("DEVICE_TOUCH_ID_ALONE", 0x11, &alone);
 
     let both = KeyFile::device(dir.path().join("both"));
-    both.write(&Secret::copy_of(&[0x11; 32]), Protection::Passphrase(&under))
-        .unwrap();
-    both.add_lock(Some(with(&under)), NewLock::TouchId { reason })
+    both.write(
+        &Secret::copy_of(&[0x11; 32]),
+        Protection::Passphrase(&under),
+    )
+    .unwrap();
+    both.add_lock(Some(with(&under)), NewLock::TouchId { reason, wait: WAIT })
         .unwrap();
     print("DEVICE_PASSPHRASE_AND_TOUCH_ID", 0x11, &both);
 }

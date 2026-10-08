@@ -8,7 +8,8 @@
 //!   lives, and only this Mac's enclave can use it.
 //! - [`load`] takes a blob back and checks it holds the public key you expect.
 //! - [`Key::agree`] does ECDH between the enclave key and a peer's public key. It is the one call that
-//!   asks for a touch, with your reason in the dialog, and it asks again every time.
+//!   asks for a touch, with your reason in the dialog, and it asks again every time. It closes its
+//!   own dialog after the wait you give it.
 //! - [`Key::check`] says, with no dialog, whether the key opens on this Mac and still asks for
 //!   a touch.
 //!
@@ -34,12 +35,14 @@
 //! # #[cfg(target_os = "macos")]
 //! # fn main() -> Result<(), keystore_enclave::Error> {
 //! # let peer = [4; keystore_enclave::PUBLIC_KEY_LEN];
+//! use core::time::Duration;
+//!
 //! use keystore_enclave::{Policy, create, load};
 //!
 //! let (blob, public) = create(Policy::BiometryCurrentSet)?; // keep both in your own file
 //! let key = load(&blob, &public)?;
 //! key.check()?; // opens on this Mac and still asks for a touch; no dialog
-//! let secret = key.agree(&peer, "open your key")?; // asks for a touch
+//! let secret = key.agree(&peer, "open your key", Duration::from_secs(60))?; // asks for a touch
 //! # drop(secret);
 //! # Ok(())
 //! # }

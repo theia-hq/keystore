@@ -168,8 +168,8 @@ impl KeyFile {
                 Protection::Passphrase(passphrase) => {
                     locked.unlock(Unlock::Passphrase(passphrase)).map(drop)
                 }
-                Protection::TouchId { reason } => {
-                    locked.unlock(Unlock::TouchId { reason }).map(drop)
+                Protection::TouchId { reason, wait } => {
+                    locked.unlock(Unlock::TouchId { reason, wait }).map(drop)
                 }
                 Protection::Plain => Err(Error::Unconfirmed {
                     path: self.path.clone(),
@@ -423,7 +423,9 @@ impl KeyFile {
             Protection::Passphrase(passphrase) => {
                 self.seal(secret, NewLock::Passphrase(passphrase))
             }
-            Protection::TouchId { reason } => self.seal(secret, NewLock::TouchId { reason }),
+            Protection::TouchId { reason, wait } => {
+                self.seal(secret, NewLock::TouchId { reason, wait })
+            }
         }
     }
 
@@ -745,7 +747,7 @@ impl<'a> Proof<'a> {
         match protection {
             Protection::Plain => Self::Plain,
             Protection::Passphrase(passphrase) => Self::Lock(Unlock::Passphrase(passphrase)),
-            Protection::TouchId { reason } => Self::Lock(Unlock::TouchId { reason }),
+            Protection::TouchId { reason, wait } => Self::Lock(Unlock::TouchId { reason, wait }),
         }
     }
 }

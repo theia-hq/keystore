@@ -191,8 +191,8 @@ impl Params {
             (Self::Passphrase(params), Unlock::Passphrase(passphrase)) => {
                 Some(params.kek(passphrase).map_err(MethodError::Crypto))
             }
-            (Self::TouchId(params), Unlock::TouchId { reason }) => {
-                Some(this_machine::kek(params, reason))
+            (Self::TouchId(params), Unlock::TouchId { reason, wait }) => {
+                Some(this_machine::kek(params, reason, wait))
             }
             (Self::Passphrase(_), Unlock::TouchId { .. })
             | (Self::TouchId(_), Unlock::Passphrase(_)) => None,
@@ -234,6 +234,8 @@ impl Params {
 /// Secure Enclave in a macOS build, and none anywhere else, where a `touch-id` lock is read and kept
 /// but never made or opened.
 mod this_machine {
+    use core::time::Duration;
+
     use crate::error::MethodError;
     #[cfg(not(any(test, target_os = "macos")))]
     use crate::error::TouchIdError;
@@ -257,8 +259,12 @@ mod this_machine {
     }
 
     #[cfg(any(test, target_os = "macos"))]
-    pub(super) fn kek(params: &EnclaveParams, reason: &str) -> Result<Kek, MethodError> {
-        params.kek(&enclave(), reason)
+    pub(super) fn kek(
+        params: &EnclaveParams,
+        reason: &str,
+        wait: Duration,
+    ) -> Result<Kek, MethodError> {
+        params.kek(&enclave(), reason, wait)
     }
 
     #[cfg(any(test, target_os = "macos"))]
@@ -272,7 +278,7 @@ mod this_machine {
     }
 
     #[cfg(not(any(test, target_os = "macos")))]
-    pub(super) fn kek(_: &EnclaveParams, _: &str) -> Result<Kek, MethodError> {
+    pub(super) fn kek(_: &EnclaveParams, _: &str, _: Duration) -> Result<Kek, MethodError> {
         Err(TouchIdError::Unavailable.into())
     }
 

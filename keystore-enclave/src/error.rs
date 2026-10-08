@@ -5,8 +5,9 @@ use core_foundation::error::{CFError, CFErrorRef};
 
 /// Why the enclave did not do what was asked.
 ///
-/// The variants are the cases a caller decides on differently: a key this Mac does not hold, a person
-/// who said no, a person who could not be asked. Everything else is the system's own error, kept whole.
+/// The variants are the cases a caller decides on differently: a key this Mac does not hold, a
+/// person who said no, a person who did not answer in time, a person who could not be asked.
+/// Everything else is the system's own error, kept whole.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
@@ -33,6 +34,14 @@ pub enum Error {
     /// The person cancelled, or the touch did not match.
     #[error("the touch was cancelled or did not match")]
     Declined(#[source] OsError),
+    /// No touch came within the wait [`Key::agree`](crate::Key::agree) was given, so it closed its
+    /// own dialog. Never a cancel: nobody said no. The source is LocalAuthentication's `-9` when
+    /// the dialog was up, or `-10` when the deadline came before it.
+    #[error("the wait for a touch ran out")]
+    TimedOut(#[source] OsError),
+    /// The thread that ends the wait could not be started, so no dialog was shown.
+    #[error("the timer for the Touch ID wait could not start, so no dialog was shown")]
+    Timer(#[source] std::io::Error),
     /// The key needs a person, and this operation was not allowed to ask one.
     #[error("the key needs a touch, and none could be asked for")]
     NotInteractive(#[source] OsError),
@@ -109,7 +118,7 @@ impl OsError {
     }
 
     /// An error from its parts, the description kept only if it carries no hash or key id.
-    pub(crate) fn new(domain: &str, code: isize, description: &str) -> Self {
+    pub fn new(domain: &str, code: isize, description: &str) -> Self {
         Self {
             domain: domain.to_owned(),
             code,

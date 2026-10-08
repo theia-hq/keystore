@@ -5,6 +5,7 @@
 //! anything reads it: a null handed on to the next call is how a damaged blob turns into a crash.
 
 use core::ptr;
+use core::time::Duration;
 
 use core_foundation::base::{CFOptionFlags, CFType, CFTypeRef, TCFType as _};
 use core_foundation::boolean::CFBoolean;
@@ -41,8 +42,13 @@ use crate::{PUBLIC_KEY_LEN, Policy, SECRET_LEN};
 const TOKEN_OBJECT: &str = "toid";
 
 /// LocalAuthentication's codes for a person who said no: the touch did not match, they cancelled,
-/// or the system or the program cancelled the dialog.
-const DECLINED: [isize; 4] = [-1, -2, -4, -9];
+/// or the system cancelled the dialog (the screen locked with it up).
+const DECLINED: [isize; 3] = [-1, -2, -4];
+/// LocalAuthentication's codes for a context invalidated by its own program: `-9` when it is pulled
+/// while the dialog is up, `-10` when it is pulled before the evaluation starts. Only
+/// [`Key::agree`]'s deadline invalidates a context while it is in use, so either one after the
+/// deadline fired is a timeout; without it, the system's own failure, never a cancel.
+const PULLED: [isize; 2] = [-9, -10];
 /// LocalAuthentication's code for "a person is needed, and this context may not ask".
 const NOT_INTERACTIVE: isize = -1004;
 
@@ -152,10 +158,15 @@ impl Key {
     /// Agree a secret with `peer` (a P-256 public key, uncompressed X9.63): the x-coordinate of the
     /// shared point, as ECDH defines it. This is the one call that asks for a touch, with `reason`
     /// in the dialog. Each call asks again.
+    ///
+    /// The dialog stays up at most `wait`: then this call closes it itself and fails as
+    /// [`Error::TimedOut`]. Nothing outside the call can reach the dialog, and it does not close when
+    /// the program that asked exits, so the bound has to be here.
     pub fn agree(
         &self,
         peer: &[u8; PUBLIC_KEY_LEN],
         reason: &str,
+        wait: Duration,
     ) -> Result<Zeroizing<[u8; SECRET_LEN]>, Error> {
         // The dialog shows the reason as the whole of why it asks; an empty one asks with no why.
         if reason.trim().is_empty() {
@@ -163,7 +174,10 @@ impl Key {
         }
         let context = Context::asking(reason)?;
         let key = self.reload(Some(&context))?;
-        exchange(&key, peer)
+        let peer = public_key(peer)?;
+        let (agreed, fired) = context.within(wait, || exchange(&key, &peer))?;
+        // A touch in the last instant, after the deadline fired, still agreed: it is kept.
+        agreed.map_err(|error| past(error, fired))
     }
 
     /// Ask for an agreement with nobody allowed to answer: `Ok` when the enclave refuses only for want
@@ -174,7 +188,7 @@ impl Key {
         let context = Context::silent()?;
         let key = self.reload(Some(&context))?;
         // Any valid point serves as the peer: the enclave refuses before it looks at it.
-        let peer = public_of(&key)?;
+        let peer = public_key(&public_of(&key)?)?;
         match exchange(&key, &peer) {
             Err(Error::NotInteractive(_)) => Ok(()),
             Ok(_) => Err(Error::Unguarded),
@@ -221,11 +235,7 @@ impl Key {
 }
 
 /// ECDH between the enclave key and `peer`, through the enclave.
-fn exchange(
-    key: &CFType,
-    peer: &[u8; PUBLIC_KEY_LEN],
-) -> Result<Zeroizing<[u8; SECRET_LEN]>, Error> {
-    let peer = public_key(peer)?;
+fn exchange(key: &CFType, peer: &CFType) -> Result<Zeroizing<[u8; SECRET_LEN]>, Error> {
     let parameters = CFDictionary::<CFType, CFType>::from_CFType_pairs(&[]);
     let mut error: CFErrorRef = ptr::null_mut();
     // SAFETY: both keys are live `SecKey`s, the algorithm is a static `CFString`, the parameters are
@@ -234,28 +244,13 @@ fn exchange(
         SecKeyCopyKeyExchangeResult(
             sec_key(key),
             kSecKeyAlgorithmECDHKeyExchangeStandard,
-            sec_key(&peer),
+            sec_key(peer),
             parameters.as_concrete_TypeRef(),
             &raw mut error,
         )
     };
     if shared.is_null() {
-        let os = OsError::take(error);
-        return Err(
-            if DECLINED
-                .iter()
-                .any(|&code| os.is_local_authentication(code))
-            {
-                Error::Declined(os)
-            } else if os.is_local_authentication(NOT_INTERACTIVE) {
-                Error::NotInteractive(os)
-            } else if os.is_token() {
-                // A damaged blob, or another Mac's, loads and then fails here, before any dialog.
-                Error::Load(os)
-            } else {
-                Error::Agree(os)
-            },
-        );
+        return Err(read(OsError::take(error)));
     }
     // SAFETY: `shared` is a non-null +1 `CFData` this function owns.
     let shared = unsafe { CFData::wrap_under_create_rule(shared) };
@@ -268,6 +263,36 @@ fn exchange(
     }
     secret.copy_from_slice(shared.bytes());
     Ok(secret)
+}
+
+/// What an agreement's refusal says, by its domain and code.
+fn read(os: OsError) -> Error {
+    let local_authentication =
+        |codes: &[isize]| codes.iter().any(|&code| os.is_local_authentication(code));
+    if local_authentication(&DECLINED) {
+        Error::Declined(os)
+    } else if local_authentication(&[NOT_INTERACTIVE]) {
+        Error::NotInteractive(os)
+    } else if os.is_token() {
+        // A damaged blob, or another Mac's, loads and then fails here, before any dialog.
+        Error::Load(os)
+    } else {
+        Error::Agree(os)
+    }
+}
+
+/// An agreement's refusal once its deadline is known: a pulled context after the deadline fired is
+/// the wait running out. Any other refusal keeps its own reading, a cancel in the last instant
+/// included.
+fn past(error: Error, fired: bool) -> Error {
+    match error {
+        Error::Agree(os)
+            if fired && PULLED.iter().any(|&code| os.is_local_authentication(code)) =>
+        {
+            Error::TimedOut(os)
+        }
+        error => error,
+    }
 }
 
 /// A key's public half, uncompressed X9.63.

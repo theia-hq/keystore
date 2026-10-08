@@ -104,7 +104,11 @@ mod probe {
         println!(
             "the old key now asks for a touch once; touch with any enrolled finger, or cancel"
         );
-        let agreed = key.agree(&base_point(), "test whether this old key still opens");
+        let agreed = key.agree(
+            &base_point(),
+            "test whether this old key still opens",
+            Duration::from_secs(60),
+        );
         println!(
             "{} after enrolling: agree: {}",
             now(),
