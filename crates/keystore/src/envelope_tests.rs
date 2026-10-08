@@ -12,8 +12,8 @@ use crate::passphrase::Passphrase;
 use crate::public_key::PublicKey;
 use crate::secret::Secret;
 
-/// A version 2 sealed device key file, byte for byte. THE format test: a file this build wrote must
-/// open to the same key forever, so these bytes are literal, never computed at test time.
+/// A version 2 sealed standard key file, byte for byte. THE format test: a file this build wrote
+/// must open to the same key forever, so these bytes are literal, never computed at test time.
 ///
 /// They were produced outside this crate, from the layout in the module docs alone: Argon2id by the
 /// OpenSSL 3.6 CLI (`openssl kdf ... ARGON2ID`, version 19), XChaCha20-Poly1305 by an implementation
@@ -39,11 +39,11 @@ const GOLDEN: [u8; 219] = [
     0x67, 0x93, 0x19, 0x21, 0x7c, 0x8d, 0x08, 0xaf, 0xc2, 0xb0, 0x87,
 ];
 
-/// [`GOLDEN`] sealed as a root key: the same inputs with the kind byte at 2, computed the same way.
-/// The kind is in every byte the lock and the seed's seal authenticate, so the wrapped file key and
-/// both tags differ.
+/// [`GOLDEN`] sealed as a sealed-only key: the same inputs with the kind byte at 2, computed the
+/// same way. The kind is in every byte the lock and the seed's seal authenticate, so the wrapped
+/// file key and both tags differ.
 #[rustfmt::skip]
-const GOLDEN_ROOT: [u8; 219] = [
+const GOLDEN_SEALED: [u8; 219] = [
     0x4b, 0x45, 0x59, 0x53, 0x54, 0x4f, 0x52, 0x45, 0x02, 0x02, 0x03, 0xa1, 0x07, 0xbf, 0xf3, 0xce,
     0x10, 0xbe, 0x1d, 0x70, 0xdd, 0x18, 0xe7, 0x4b, 0xc0, 0x99, 0x67, 0xe4, 0xd6, 0x30, 0x9b, 0xa5,
     0x0d, 0x5f, 0x1d, 0xdc, 0x86, 0x64, 0x12, 0x55, 0x31, 0xb8, 0x01, 0x01, 0x00, 0x65, 0x01, 0x00,
@@ -145,7 +145,7 @@ fn golden_passphrase() -> Passphrase {
 }
 
 fn sealed(bytes: &[u8]) -> Envelope {
-    sealed_as(bytes, Kind::Device)
+    sealed_as(bytes, Kind::Standard)
 }
 
 fn sealed_as(bytes: &[u8], expected: Kind) -> Envelope {
@@ -157,7 +157,7 @@ fn sealed_as(bytes: &[u8], expected: Kind) -> Envelope {
 }
 
 fn refusal(bytes: &[u8]) -> FormatError {
-    refusal_as(bytes, Kind::Device)
+    refusal_as(bytes, Kind::Standard)
 }
 
 fn refusal_as(bytes: &[u8], expected: Kind) -> FormatError {
@@ -209,10 +209,10 @@ fn passphrase_lock(
     .unwrap()
 }
 
-/// A device key file at the cheapest cost a file may carry, for the tests that unlock many times.
+/// A standard key file at the cheapest cost a file may carry, for the tests that unlock many times.
 fn floor_image(secret: &Secret, under: &Passphrase) -> Vec<u8> {
     build(
-        Kind::Device,
+        Kind::Standard,
         secret.public_key(),
         secret,
         under,
@@ -238,7 +238,7 @@ fn the_golden_vector_opens_to_its_seed() {
 fn this_build_writes_the_golden_vector_byte_for_byte() {
     let secret = Secret::copy_of(&golden_seed());
     let image = build(
-        Kind::Device,
+        Kind::Standard,
         secret.public_key(),
         &secret,
         &golden_passphrase(),
@@ -249,33 +249,33 @@ fn this_build_writes_the_golden_vector_byte_for_byte() {
 }
 
 #[test]
-fn the_golden_root_vector_opens_to_its_seed_only_as_a_root_key() {
-    let envelope = sealed_as(&GOLDEN_ROOT, Kind::Root);
+fn the_golden_sealed_vector_opens_to_its_seed_only_as_a_sealed_only_key() {
+    let envelope = sealed_as(&GOLDEN_SEALED, Kind::Sealed);
     let opened = open(&envelope, &golden_passphrase()).unwrap();
     opened
         .secret
         .with_bytes(|seed| assert_eq!(seed, &golden_seed()));
     assert_eq!(
-        refusal_as(&GOLDEN_ROOT, Kind::Device),
+        refusal_as(&GOLDEN_SEALED, Kind::Standard),
         FormatError::WrongKind {
-            expected: Kind::Device,
-            found: Kind::Root
+            expected: Kind::Standard,
+            found: Kind::Sealed
         }
     );
 }
 
 #[test]
-fn this_build_writes_the_golden_root_vector_byte_for_byte() {
+fn this_build_writes_the_golden_sealed_vector_byte_for_byte() {
     let secret = Secret::copy_of(&golden_seed());
     let image = build(
-        Kind::Root,
+        Kind::Sealed,
         secret.public_key(),
         &secret,
         &golden_passphrase(),
         golden_cost(),
         golden_salt(),
     );
-    assert_eq!(image, GOLDEN_ROOT);
+    assert_eq!(image, GOLDEN_SEALED);
 }
 
 #[test]
@@ -300,7 +300,7 @@ fn a_decomposed_typing_of_the_passphrase_opens_the_nfc_golden_lock() {
 fn a_version_1_file_is_refused_as_version_1() {
     assert_eq!(refusal(&VERSION_1), FormatError::Version { found: 1 });
     assert_eq!(
-        refusal_as(&VERSION_1, Kind::Root),
+        refusal_as(&VERSION_1, Kind::Sealed),
         FormatError::Version { found: 1 }
     );
 }
@@ -308,17 +308,17 @@ fn a_version_1_file_is_refused_as_version_1() {
 #[test]
 fn a_sealed_key_is_read_only_as_its_own_kind() {
     assert_eq!(
-        refusal_as(&GOLDEN, Kind::Root),
+        refusal_as(&GOLDEN, Kind::Sealed),
         FormatError::WrongKind {
-            expected: Kind::Root,
-            found: Kind::Device
+            expected: Kind::Sealed,
+            found: Kind::Standard
         }
     );
 }
 
 #[test]
 fn a_plain_seed_has_no_kind_to_refuse_it_by() {
-    for expected in [Kind::Device, Kind::Root] {
+    for expected in [Kind::Standard, Kind::Sealed] {
         assert!(matches!(
             parse(&[9; 32], expected),
             Ok(Parsed::Plain(seed)) if seed == &[9; 32]
@@ -327,13 +327,13 @@ fn a_plain_seed_has_no_kind_to_refuse_it_by() {
 }
 
 #[test]
-fn a_device_key_relabelled_as_a_root_key_does_not_unlock() {
+fn a_standard_key_relabelled_as_a_sealed_only_key_does_not_unlock() {
     // The kind byte is authenticated by the lock and by the seed's seal: rewriting it gets past the
     // parser, which reads it before anything is verified, and then fails the unlock rather than
-    // opening a device key as a root key.
+    // opening a standard key as a sealed-only key.
     let mut relabelled = GOLDEN;
     relabelled[9] = 2;
-    let envelope = sealed_as(&relabelled, Kind::Root);
+    let envelope = sealed_as(&relabelled, Kind::Sealed);
     assert!(matches!(
         open(&envelope, &golden_passphrase()),
         Err(Refusal::Unlock(_))
@@ -344,8 +344,8 @@ fn a_device_key_relabelled_as_a_root_key_does_not_unlock() {
 fn every_seal_uses_the_golden_cost_and_draws_a_fresh_file_key_salt_and_nonces() {
     let secret = Secret::copy_of(&golden_seed());
     let under = passphrase("correct horse battery staple");
-    let first = Envelope::seal(&secret, Kind::Device, NewLock::Passphrase(&under)).unwrap();
-    let second = Envelope::seal(&secret, Kind::Device, NewLock::Passphrase(&under)).unwrap();
+    let first = Envelope::seal(&secret, Kind::Standard, NewLock::Passphrase(&under)).unwrap();
+    let second = Envelope::seal(&secret, Kind::Standard, NewLock::Passphrase(&under)).unwrap();
     for image in [&first, &second] {
         assert_eq!(image.len(), GOLDEN_LEN);
         assert_eq!(image[..AT_SALT], GOLDEN[..AT_SALT]);
@@ -461,7 +461,7 @@ fn any_edit_to_a_lock_fails_the_whole_file() {
 
 #[test]
 fn a_plain_file_is_exactly_32_bytes() {
-    assert!(matches!(parse(&[9; 32], Kind::Device), Ok(Parsed::Plain(seed)) if seed == &[9; 32]));
+    assert!(matches!(parse(&[9; 32], Kind::Standard), Ok(Parsed::Plain(seed)) if seed == &[9; 32]));
     for found in [0, 1, 31, 33, 218, 219, 220] {
         assert_eq!(
             refusal(&vec![9; found]),
@@ -523,7 +523,7 @@ fn a_header_that_does_not_match_the_seed_refuses_the_unlock() {
         ("bytes that are no key", PublicKey([0xff; 32])),
     ] {
         let image = build(
-            Kind::Device,
+            Kind::Standard,
             claimed,
             &secret,
             &under,
@@ -548,8 +548,9 @@ fn a_header_that_does_not_match_the_seed_refuses_the_unlock() {
 
 #[test]
 fn only_registered_kinds_and_derivations_parse() {
-    // Kinds 1 and 2 are the device and root keys; derivation 1 is Argon2id. No other value is
-    // registered, so a value reserved for the future cannot be carried by a file this build accepts.
+    // Kinds 1 and 2 are the standard and sealed-only keys; derivation 1 is Argon2id. No other value
+    // is registered, so a value reserved for the future cannot be carried by a file this build
+    // accepts.
     for found in [0, 3, 255] {
         let mut image = GOLDEN;
         image[9] = found;
@@ -560,6 +561,18 @@ fn only_registered_kinds_and_derivations_parse() {
         image[AT_KDF] = found;
         assert_eq!(refusal(&image), FormatError::Kdf { found });
     }
+}
+
+#[test]
+fn each_kind_is_the_byte_it_always_was() {
+    // The kind byte is format, not a name: whatever the variants are called, each reads and writes
+    // the byte below, and the golden files carry it, so a file keeps the kind it was written as.
+    assert_eq!(Kind::Standard.byte(), 1);
+    assert_eq!(Kind::Sealed.byte(), 2);
+    assert_eq!(Kind::of_byte(1), Some(Kind::Standard));
+    assert_eq!(Kind::of_byte(2), Some(Kind::Sealed));
+    assert_eq!(GOLDEN[9], 1);
+    assert_eq!(GOLDEN_SEALED[9], 2);
 }
 
 #[test]
@@ -667,7 +680,7 @@ fn a_cost_outside_the_bounds_is_refused_before_any_key_is_derived() {
 fn the_bounds_are_inclusive_and_hold_both_costs_this_crate_uses() {
     for (memory_kib, passes, lanes) in [(256 * 1024, 10, 8), (19 * 1024, 2, 1)] {
         assert!(matches!(
-            parse(&with_cost(memory_kib, passes, lanes), Kind::Device),
+            parse(&with_cost(memory_kib, passes, lanes), Kind::Standard),
             Ok(Parsed::Sealed(_))
         ));
     }
@@ -675,9 +688,10 @@ fn the_bounds_are_inclusive_and_hold_both_costs_this_crate_uses() {
     assert_eq!(Cost::parse(64 * 1024, 3, 1), Ok(Cost::DEFAULT));
 }
 
-/// A version 2 sealed device key file with two locks: [`GOLDEN`]'s passphrase lock, then a `touch-id`
-/// lock on the software stand-in for the enclave. Every other input is [`GOLDEN`]'s, so the passphrase
-/// record is byte for byte the one there; the seed's seal differs, because it covers both records.
+/// A version 2 sealed standard key file with two locks: [`GOLDEN`]'s passphrase lock, then a
+/// `touch-id` lock on the software stand-in for the enclave. Every other input is [`GOLDEN`]'s, so
+/// the passphrase record is byte for byte the one there; the seed's seal differs, because it covers
+/// both records.
 ///
 /// Computed outside this crate from the layout in the module docs alone: P-256 written from SEC 1
 /// and checked against `openssl` for public keys and for ECDH, HKDF-SHA256 written from RFC 5869 and
@@ -851,11 +865,11 @@ fn the_touch_id_golden_vector_opens_to_its_seed_through_either_lock() {
 #[test]
 fn this_build_writes_the_touch_id_golden_vectors_byte_for_byte() {
     assert_eq!(
-        build_with(Kind::Device, &[golden_passphrase_lock, touch_id_lock]),
+        build_with(Kind::Standard, &[golden_passphrase_lock, touch_id_lock]),
         GOLDEN_TOUCH_ID
     );
     assert_eq!(
-        build_with(Kind::Device, &[touch_id_lock]),
+        build_with(Kind::Standard, &[touch_id_lock]),
         GOLDEN_TOUCH_ID_ALONE
     );
     // The layout's offsets, read off the golden file.
@@ -905,7 +919,7 @@ fn a_touch_id_key_file_alone_opens_nothing() {
 
 #[test]
 fn reordering_two_locks_fails_the_whole_file() {
-    let image = build_with(Kind::Device, &[floor_passphrase_lock, touch_id_lock]);
+    let image = build_with(Kind::Standard, &[floor_passphrase_lock, touch_id_lock]);
     let envelope = sealed(&image);
     assert!(envelope.unlock(touch()).is_ok());
     assert!(open(&envelope, &golden_passphrase()).is_ok());
@@ -938,12 +952,12 @@ const NONCE_LEN_AND_SEAL: usize = 24 + 48;
 
 #[test]
 fn any_edit_to_a_touch_id_lock_fails_the_whole_file() {
-    let image = build_with(Kind::Device, &[floor_passphrase_lock, touch_id_lock]);
+    let image = build_with(Kind::Standard, &[floor_passphrase_lock, touch_id_lock]);
     // Every byte of the record: refused as it is read, or the touch does not open it.
     for at in AT_TOUCH_ID..image.len() - NONCE_LEN_AND_SEAL {
         let mut edited = image.clone();
         edited[at] ^= 0x01;
-        let Ok(Parsed::Sealed(envelope)) = parse(&edited, Kind::Device) else {
+        let Ok(Parsed::Sealed(envelope)) = parse(&edited, Kind::Standard) else {
             continue;
         };
         assert!(
@@ -971,12 +985,12 @@ fn any_edit_to_a_touch_id_lock_fails_the_whole_file() {
 }
 
 #[test]
-fn a_root_without_a_passphrase_lock_is_refused() {
+fn a_sealed_only_key_without_a_passphrase_lock_is_refused() {
     assert_eq!(
-        refusal_as(&build_with(Kind::Root, &[touch_id_lock]), Kind::Root),
+        refusal_as(&build_with(Kind::Sealed, &[touch_id_lock]), Kind::Sealed),
         FormatError::NoPortableLock
     );
-    // With its passphrase lock beside it, in either place, the same root reads.
+    // With its passphrase lock beside it, in either place, the same key reads.
     for locks in [
         [
             floor_passphrase_lock as fn(&FileKey, &[u8; HEADER_LEN]) -> Lock,
@@ -984,9 +998,9 @@ fn a_root_without_a_passphrase_lock_is_refused() {
         ],
         [touch_id_lock, floor_passphrase_lock],
     ] {
-        sealed_as(&build_with(Kind::Root, &locks), Kind::Root);
+        sealed_as(&build_with(Kind::Sealed, &locks), Kind::Sealed);
     }
-    // A device key keeps no such rule: this machine's key may hold the touch alone.
+    // A standard key keeps no such rule: this machine's key may hold the touch alone.
     sealed(&GOLDEN_TOUCH_ID_ALONE);
 }
 

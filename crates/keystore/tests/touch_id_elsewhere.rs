@@ -77,10 +77,10 @@ fn golden_file(name: &str) -> (KeyFile, PathBuf) {
         std::env::temp_dir().join(format!("keystore-elsewhere-{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir(&dir).unwrap();
-    let path = dir.join("device.key");
+    let path = dir.join("standard.key");
     fs::write(&path, GOLDEN_TOUCH_ID).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-    (KeyFile::device(path), dir)
+    (KeyFile::new(path), dir)
 }
 
 fn locked(file: &KeyFile) -> keystore::Locked {
@@ -147,7 +147,7 @@ fn nothing_here_makes_or_opens_a_touch_id_lock_or_leaves_one_alone() {
     )));
     assert_eq!(fs::read(file.path()).unwrap(), before);
 
-    let fresh = KeyFile::device(dir.join("fresh.key"));
+    let fresh = KeyFile::new(dir.join("fresh.key"));
     assert!(unavailable(fresh.write(
         &Secret::generate().unwrap(),
         Protection::TouchId {

@@ -134,7 +134,7 @@ fn the_storage_core_depends_on_registry_crates_only() {
     // A git or path source is how a crate of the family would arrive: none may. The one exception is
     // the enclave crate, which is this repository's own, beside this one, and depends on nothing of
     // this crate's.
-    const OWN: &str = "keystore-enclave={path=\"keystore-enclave\"}";
+    const OWN: &str = "keystore-enclave={path=\"../keystore-enclave\"}";
     let lines = dependency_lines(&manifest);
     assert!(
         lines.len() >= 8,

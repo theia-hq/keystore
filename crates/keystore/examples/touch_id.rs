@@ -4,8 +4,8 @@
 //! cargo run --example touch_id -- <path>
 //! ```
 //!
-//! With nothing at `<path>`, it writes a new device key there sealed under a `touch-id` lock, so the
-//! key is never on disk plain; the new file is proven by opening it through the lock, which asks for
+//! With nothing at `<path>`, it writes a new key there sealed under a `touch-id` lock, so the key
+//! is never on disk plain; the new file is proven by opening it through the lock, which asks for
 //! one touch. Then, and on every later run, it lists the file's locks, says which can open on this
 //! Mac without asking for anything, and opens the key with a touch. Run it at an unlocked Mac with
 //! Touch ID set up. Delete `<path>` to start again.
@@ -21,7 +21,7 @@ fn main() -> Result<(), Box<dyn core::error::Error>> {
     let Some(path) = std::env::args_os().nth(1) else {
         return Err("usage: touch_id <path>".into());
     };
-    let file = KeyFile::device(path);
+    let file = KeyFile::new(path);
 
     if file.load()?.is_none() {
         file.write(
@@ -31,7 +31,7 @@ fn main() -> Result<(), Box<dyn core::error::Error>> {
                 wait: WAIT,
             },
         )?;
-        println!("wrote a new device key and locked it with touch-id");
+        println!("wrote a new key and locked it with touch-id");
     }
 
     let Some(Stored::Locked(locked)) = file.load()? else {

@@ -115,29 +115,30 @@ pub enum Error {
         /// The public key the adopt offered.
         incoming: PublicKey,
     },
-    /// A write asked to store a root key plain. A root key is only ever written sealed: a plain one is
-    /// every device it vouches for in one readable file.
-    #[error("a root key is always sealed; {} was not written plain", path.display())]
-    PlainRoot {
+    /// A write asked to store a sealed-only key plain. A sealed-only key is only ever written
+    /// sealed.
+    #[error("a sealed-only key is always sealed; {} was not written plain", path.display())]
+    PlainSealed {
         /// The key file.
         path: PathBuf,
     },
-    /// A lock change would leave a root key with no lock that opens on another machine: removing its
-    /// passphrase lock, or sealing a plain root under a lock that opens on this machine alone. A root
-    /// key always keeps one, because it is how a copy of the file opens anywhere else.
-    #[error("a root key always has a passphrase lock; {} was not changed", path.display())]
-    RootPassphrase {
+    /// A lock change would leave a sealed-only key with no lock that opens on another machine:
+    /// removing its passphrase lock, or sealing a plain one under a lock that opens on this machine
+    /// alone. A sealed-only key always keeps one, because it is how a copy of the file opens
+    /// anywhere else.
+    #[error("a sealed-only key always has a passphrase lock; {} was not changed", path.display())]
+    SealedPassphrase {
         /// The key file.
         path: PathBuf,
     },
-    /// A lock change asked to set a root key's passphrase lock while opening the file with a lock
-    /// that opens on this machine alone. Whoever holds only that lock must not be able to set a
-    /// passphrase that opens every copy of the root.
+    /// A lock change asked to set a sealed-only key's passphrase lock while opening the file with a
+    /// lock that opens on this machine alone. Whoever holds only that lock must not be able to set
+    /// a passphrase that opens every copy of the key.
     #[error(
-        "a root key's passphrase changes only when the file is opened with it; {} was not changed",
+        "a sealed-only key's passphrase changes only when the file is opened with it; {} was not changed",
         path.display()
     )]
-    RootPassphraseNeeded {
+    SealedPassphraseNeeded {
         /// The key file.
         path: PathBuf,
     },
@@ -278,8 +279,8 @@ pub enum FormatError {
         /// The kind byte.
         found: u8,
     },
-    /// A sealed file of a known kind, read where the other kind belongs: a device key presented as a
-    /// root key, or a root key as a device key.
+    /// A sealed file of a known kind, read where the other kind belongs: a standard key presented
+    /// as a sealed-only key, or a sealed-only key as a standard key.
     #[error("the sealed file is a {found}, not a {expected}")]
     WrongKind {
         /// The kind the reader expected.
@@ -296,9 +297,9 @@ pub enum FormatError {
     /// A sealed file with no locks: nothing could open it, so it is not a sealed key.
     #[error("the sealed key has no locks")]
     NoLocks,
-    /// A sealed root key with no lock that opens on another machine. A root key always keeps its
-    /// passphrase lock, so a list without one was not written by this crate.
-    #[error("the sealed root key has no passphrase lock")]
+    /// A sealed-only key with no lock that opens on another machine. A sealed-only key always keeps
+    /// its passphrase lock, so a list without one was not written by this crate.
+    #[error("the sealed-only key has no passphrase lock")]
     NoPortableLock,
     /// Two locks of one method. A file holds at most one of each.
     #[error("the sealed key has more than one {method} lock")]
@@ -459,8 +460,19 @@ pub enum TouchIdError {
 pub struct EnclaveError(Box<dyn core::error::Error + Send + Sync>);
 
 impl EnclaveError {
-    #[cfg(any(test, target_os = "macos"))]
-    pub(crate) fn new(source: impl core::error::Error + Send + Sync + 'static) -> Self {
+    /// Wrap `source` as what the enclave said. This crate builds one from each enclave failure; a
+    /// caller builds one to make the [`TouchIdError`] it needs in its own tests, on any target, since
+    /// a build without an enclave has no other way to reach most of the variants.
+    ///
+    /// It is only an error value: it carries no path and no key, and opens nothing.
+    ///
+    /// ```
+    /// use keystore::{EnclaveError, TouchIdError};
+    ///
+    /// let timed_out = TouchIdError::TimedOut(EnclaveError::new(std::io::Error::other("no touch")));
+    /// assert_eq!(timed_out.to_string(), "no touch came in time");
+    /// ```
+    pub fn new(source: impl core::error::Error + Send + Sync + 'static) -> Self {
         Self(Box::new(source))
     }
 }

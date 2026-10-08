@@ -30,7 +30,7 @@ fn lock(passphrase: &Passphrase) -> NewLock<'_> {
 }
 
 fn key_file(dir: &TestDir) -> KeyFile {
-    KeyFile::device(dir.join("identity.key"))
+    KeyFile::new(dir.join("identity.key"))
 }
 
 fn plain_file(dir: &TestDir, seed: [u8; 32]) -> (KeyFile, Secret) {
@@ -439,7 +439,7 @@ fn a_second_lock_of_one_method_replaces_it() {
 }
 
 #[test]
-fn removing_a_device_keys_last_lock_writes_it_plain() {
+fn removing_a_standard_keys_last_lock_writes_it_plain() {
     let dir = TestDir::new();
     let under = passphrase("correct horse battery staple");
     let (file, secret) = sealed_file(&dir, [6; 32], &under);
@@ -647,7 +647,7 @@ fn a_new_form_that_does_not_read_back_never_replaces_the_original() {
     // A well-formed sealed file, but locked under a passphrase other than the one the change is
     // adding: the stage is written, the test-unlock fails, and the rename must not happen.
     let other_passphrase = passphrase("something else");
-    let wrong = Envelope::seal(&secret, Kind::Device, lock(&other_passphrase)).unwrap();
+    let wrong = Envelope::seal(&secret, Kind::Standard, lock(&other_passphrase)).unwrap();
     assert!(matches!(
         file.replace(
             &wrong,
@@ -659,7 +659,7 @@ fn a_new_form_that_does_not_read_back_never_replaces_the_original() {
     ));
     // And a form that opens, but to another key.
     let other = Secret::copy_of(&[8; 32]);
-    let elsewhere = Envelope::seal(&other, Kind::Device, lock(&under)).unwrap();
+    let elsewhere = Envelope::seal(&other, Kind::Standard, lock(&under)).unwrap();
     assert!(matches!(
         file.replace(
             &elsewhere,
@@ -700,7 +700,7 @@ fn a_lock_change_through_a_link_rewrites_the_file_the_link_names() {
     // The key is kept in a managed directory and linked into place, as a dotfile manager lays it out.
     let kept_dir = dir.join("dotfiles");
     fs::create_dir(&kept_dir).unwrap();
-    let kept = KeyFile::device(kept_dir.join("identity.key"));
+    let kept = KeyFile::new(kept_dir.join("identity.key"));
     let secret = Secret::copy_of(&[6; 32]);
     kept.write(&secret, Protection::Plain).unwrap();
     let file = key_file(&dir);
@@ -749,7 +749,7 @@ fn a_new_key_that_does_not_read_back_is_never_published() {
     // Sealed under another passphrase than the one the write is for: the stage is written, its
     // test-unlock fails, and nothing may appear at the path.
     let other_passphrase = passphrase("something else");
-    let wrong = Envelope::seal(&secret, Kind::Device, lock(&other_passphrase)).unwrap();
+    let wrong = Envelope::seal(&secret, Kind::Standard, lock(&other_passphrase)).unwrap();
     assert!(matches!(
         file.create(&wrong, Proof::Lock(with(&under)), secret.public_key()),
         Err(Error::Unverified { .. })
@@ -757,13 +757,13 @@ fn a_new_key_that_does_not_read_back_is_never_published() {
     assert!(dir.names().is_empty());
 }
 
-fn root_file(dir: &TestDir) -> KeyFile {
-    KeyFile::root(dir.join("root.key"))
+fn sealed_only_file(dir: &TestDir) -> KeyFile {
+    KeyFile::sealed(dir.join("sealed-only.key"))
 }
 
 /// The same path, named as the other kind.
-fn as_device(file: &KeyFile) -> KeyFile {
-    KeyFile::device(file.path())
+fn as_standard(file: &KeyFile) -> KeyFile {
+    KeyFile::new(file.path())
 }
 
 fn wrong_kind(outcome: Result<Option<Stored>, Error>) -> (Kind, Kind) {
@@ -777,37 +777,40 @@ fn wrong_kind(outcome: Result<Option<Stored>, Error>) -> (Kind, Kind) {
 }
 
 #[test]
-fn a_root_key_is_written_sealed_as_the_root_kind() {
+fn a_sealed_only_key_is_written_sealed_as_the_sealed_only_kind() {
     let dir = TestDir::new();
-    let file = root_file(&dir);
+    let file = sealed_only_file(&dir);
     let under = passphrase("correct horse battery staple");
     let secret = Secret::copy_of(&[4; 32]);
     file.write(&secret, Protection::Passphrase(&under)).unwrap();
 
-    assert_eq!(file.kind(), Kind::Root);
+    assert_eq!(file.kind(), Kind::Sealed);
     assert_eq!(bytes(&file).len(), SEALED_LEN);
     assert_eq!(
         locked(&file).unlock(with(&under)).unwrap().public_key(),
         secret.public_key()
     );
     assert_eq!(
-        wrong_kind(as_device(&file).load()),
-        (Kind::Device, Kind::Root)
+        wrong_kind(as_standard(&file).load()),
+        (Kind::Standard, Kind::Sealed)
     );
 }
 
 #[test]
-fn a_device_key_file_in_the_root_slot_is_refused_by_kind() {
+fn a_standard_key_file_in_the_sealed_only_slot_is_refused_by_kind() {
     let dir = TestDir::new();
     let under = passphrase("correct horse battery staple");
-    let (device, secret) = sealed_file(&dir, [4; 32], &under);
-    let root = KeyFile::root(device.path());
-    let before = bytes(&device);
+    let (standard, secret) = sealed_file(&dir, [4; 32], &under);
+    let sealed_only = KeyFile::sealed(standard.path());
+    let before = bytes(&standard);
 
-    assert_eq!(wrong_kind(root.load()), (Kind::Root, Kind::Device));
+    assert_eq!(
+        wrong_kind(sealed_only.load()),
+        (Kind::Sealed, Kind::Standard)
+    );
     // Every other door refuses it for the same reason, and none of them changes it.
     assert!(matches!(
-        root.adopt(&secret, Protection::Passphrase(&under)),
+        sealed_only.adopt(&secret, Protection::Passphrase(&under)),
         Err(Error::Format {
             source: FormatError::WrongKind { .. },
             ..
@@ -815,46 +818,46 @@ fn a_device_key_file_in_the_root_slot_is_refused_by_kind() {
     ));
     let new = passphrase("a new passphrase for it");
     assert!(matches!(
-        root.add_lock(Some(with(&under)), lock(&new)),
+        sealed_only.add_lock(Some(with(&under)), lock(&new)),
         Err(Error::Format {
             source: FormatError::WrongKind { .. },
             ..
         })
     ));
-    assert_eq!(bytes(&device), before);
+    assert_eq!(bytes(&standard), before);
 }
 
 #[test]
-fn a_plain_file_in_the_root_slot_loads_as_plain() {
+fn a_plain_file_in_the_sealed_only_slot_loads_as_plain() {
     // A plain file carries no kind to refuse it by: it loads, and the caller decides what to do with
-    // a root key it finds unsealed.
+    // a sealed-only key it finds unsealed.
     let dir = TestDir::new();
-    let (device, secret) = plain_file(&dir, [4; 32]);
-    let root = KeyFile::root(device.path());
-    assert_eq!(plain(&root).public_key(), secret.public_key());
+    let (standard, secret) = plain_file(&dir, [4; 32]);
+    let sealed_only = KeyFile::sealed(standard.path());
+    assert_eq!(plain(&sealed_only).public_key(), secret.public_key());
 }
 
 #[test]
-fn a_root_key_is_never_written_plain() {
+fn a_sealed_only_key_is_never_written_plain() {
     let dir = TestDir::new();
-    let file = root_file(&dir);
+    let file = sealed_only_file(&dir);
     let secret = Secret::copy_of(&[4; 32]);
 
     assert!(matches!(
         file.write(&secret, Protection::Plain),
-        Err(Error::PlainRoot { .. })
+        Err(Error::PlainSealed { .. })
     ));
     assert!(matches!(
         file.adopt(&secret, Protection::Plain),
-        Err(Error::PlainRoot { .. })
+        Err(Error::PlainSealed { .. })
     ));
     assert!(dir.names().is_empty());
 }
 
 #[test]
-fn a_roots_passphrase_lock_cannot_be_removed() {
+fn a_sealed_only_keys_passphrase_lock_cannot_be_removed() {
     let dir = TestDir::new();
-    let file = root_file(&dir);
+    let file = sealed_only_file(&dir);
     let under = passphrase("correct horse battery staple");
     let secret = Secret::copy_of(&[4; 32]);
     file.write(&secret, Protection::Passphrase(&under)).unwrap();
@@ -862,27 +865,28 @@ fn a_roots_passphrase_lock_cannot_be_removed() {
 
     assert!(matches!(
         file.remove_lock(with(&under), Method::Passphrase),
-        Err(Error::RootPassphrase { .. })
+        Err(Error::SealedPassphrase { .. })
     ));
     // Refused before anything is read: not even a wrong passphrase gets as far as an unlock.
     assert!(matches!(
         file.remove_lock(with(&passphrase("wrong")), Method::Passphrase),
-        Err(Error::RootPassphrase { .. })
+        Err(Error::SealedPassphrase { .. })
     ));
     assert_eq!(bytes(&file), sealed);
-    assert_eq!(dir.names(), ["root.key"]);
+    assert_eq!(dir.names(), ["sealed-only.key"]);
 }
 
 #[test]
-fn a_root_key_stays_a_root_key_through_every_lock_change() {
+fn a_sealed_only_key_stays_a_sealed_only_key_through_every_lock_change() {
     let dir = TestDir::new();
     let under = passphrase("correct horse battery staple");
     let new = passphrase("a new passphrase for it");
-    // A plain file found in the root slot, locked: it becomes a root key, not a device key.
-    let (device, secret) = plain_file(&dir, [4; 32]);
-    let file = KeyFile::root(device.path());
+    // A plain file found in the sealed-only slot, locked: it becomes a sealed-only key, not a
+    // standard key.
+    let (standard, secret) = plain_file(&dir, [4; 32]);
+    let file = KeyFile::sealed(standard.path());
     file.add_lock(None, lock(&under)).unwrap();
-    assert_eq!(wrong_kind(device.load()), (Kind::Device, Kind::Root));
+    assert_eq!(wrong_kind(standard.load()), (Kind::Standard, Kind::Sealed));
 
     // And a new passphrase keeps it one.
     file.add_lock(Some(with(&under)), lock(&new)).unwrap();
@@ -890,7 +894,7 @@ fn a_root_key_stays_a_root_key_through_every_lock_change() {
         locked(&file).unlock(with(&new)).unwrap().public_key(),
         secret.public_key()
     );
-    assert_eq!(wrong_kind(device.load()), (Kind::Device, Kind::Root));
+    assert_eq!(wrong_kind(standard.load()), (Kind::Standard, Kind::Sealed));
 }
 
 #[cfg(unix)]
@@ -916,9 +920,9 @@ fn touch_lock() -> NewLock<'static> {
     }
 }
 
-/// A sealed root key under `under`, with a `touch-id` lock added through it.
-fn root_with_touch_id(dir: &TestDir, under: &Passphrase) -> (KeyFile, Secret) {
-    let file = root_file(dir);
+/// A sealed sealed-only key under `under`, with a `touch-id` lock added through it.
+fn sealed_only_with_touch_id(dir: &TestDir, under: &Passphrase) -> (KeyFile, Secret) {
+    let file = sealed_only_file(dir);
     let secret = Secret::copy_of(&[4; 32]);
     file.write(&secret, Protection::Passphrase(under)).unwrap();
     file.add_lock(Some(with(under)), touch_lock()).unwrap();
@@ -949,23 +953,23 @@ fn a_touch_id_lock_is_added_beside_the_passphrase_and_either_opens() {
 }
 
 #[test]
-fn a_touch_cannot_set_a_roots_passphrase() {
+fn a_touch_cannot_set_a_sealed_only_keys_passphrase() {
     let dir = TestDir::new();
     let under = passphrase("correct horse battery staple");
-    let (file, secret) = root_with_touch_id(&dir, &under);
+    let (file, secret) = sealed_only_with_touch_id(&dir, &under);
     let before = bytes(&file);
     let asked = stand_in::touches();
 
     let new = passphrase("a passphrase set by whoever holds the touch");
     assert!(matches!(
         file.add_lock(Some(touch()), lock(&new)),
-        Err(Error::RootPassphraseNeeded { .. })
+        Err(Error::SealedPassphraseNeeded { .. })
     ));
     // Refused before anything is opened: no touch was even asked for.
     assert_eq!(stand_in::touches(), asked);
     assert_eq!(bytes(&file), before);
 
-    // Through its passphrase, the root's passphrase changes, and the touch still opens it.
+    // Through its passphrase, the key's passphrase changes, and the touch still opens it.
     file.add_lock(Some(with(&under)), lock(&new)).unwrap();
     let locked = locked(&file);
     assert_eq!(
@@ -978,29 +982,29 @@ fn a_touch_cannot_set_a_roots_passphrase() {
 }
 
 #[test]
-fn a_plain_root_is_never_sealed_under_a_touch_alone() {
+fn a_plain_sealed_only_key_is_never_sealed_under_a_touch_alone() {
     let dir = TestDir::new();
-    let (device, _) = plain_file(&dir, [4; 32]);
-    let file = KeyFile::root(device.path());
+    let (standard, _) = plain_file(&dir, [4; 32]);
+    let file = KeyFile::sealed(standard.path());
 
     assert!(matches!(
         file.add_lock(None, touch_lock()),
-        Err(Error::RootPassphrase { .. })
+        Err(Error::SealedPassphrase { .. })
     ));
     assert_eq!(bytes(&file), [4; 32]);
     assert_eq!(stand_in::touches(), 0);
 }
 
 #[test]
-fn a_roots_touch_id_lock_comes_off_and_its_passphrase_stays() {
+fn a_sealed_only_keys_touch_id_lock_comes_off_and_its_passphrase_stays() {
     let dir = TestDir::new();
     let under = passphrase("correct horse battery staple");
-    let (file, _) = root_with_touch_id(&dir, &under);
+    let (file, _) = sealed_only_with_touch_id(&dir, &under);
 
     // The touch cannot take the passphrase off, any more than the passphrase can.
     assert!(matches!(
         file.remove_lock(touch(), Method::Passphrase),
-        Err(Error::RootPassphrase { .. })
+        Err(Error::SealedPassphrase { .. })
     ));
     file.remove_lock(touch(), Method::TouchId).unwrap();
     assert_eq!(
@@ -1086,7 +1090,7 @@ fn this_machines_key_moves_to_touch_id_alone_and_either_lock_opens_between() {
 }
 
 #[test]
-fn a_plain_device_key_takes_a_touch_id_lock_as_its_one_lock() {
+fn a_plain_standard_key_takes_a_touch_id_lock_as_its_one_lock() {
     let dir = TestDir::new();
     let (file, secret) = plain_file(&dir, [6; 32]);
 
@@ -1107,18 +1111,18 @@ fn a_plain_device_key_takes_a_touch_id_lock_as_its_one_lock() {
 fn one_context_opens_one_key() {
     let dir = TestDir::new();
     let under = passphrase("correct horse battery staple");
-    let (device, _) = sealed_file(&dir, [6; 32], &under);
-    device.add_lock(Some(with(&under)), touch_lock()).unwrap();
-    let (root, _) = root_with_touch_id(&dir, &under);
-    let (device, root) = (locked(&device), locked(&root));
+    let (standard, _) = sealed_file(&dir, [6; 32], &under);
+    standard.add_lock(Some(with(&under)), touch_lock()).unwrap();
+    let (sealed_only, _) = sealed_only_with_touch_id(&dir, &under);
+    let (standard, sealed_only) = (locked(&standard), locked(&sealed_only));
     let asked = stand_in::touches();
 
     // Each open asks for its own touch: none is kept for the next open, or lent to the other key.
-    device.unlock(touch()).unwrap();
+    standard.unlock(touch()).unwrap();
     assert_eq!(stand_in::touches(), asked + 1);
-    root.unlock(touch()).unwrap();
+    sealed_only.unlock(touch()).unwrap();
     assert_eq!(stand_in::touches(), asked + 2);
-    device.unlock(touch()).unwrap();
+    standard.unlock(touch()).unwrap();
     assert_eq!(stand_in::touches(), asked + 3);
 }
 
@@ -1254,9 +1258,9 @@ fn every_touch_is_asked_with_the_wait_its_caller_gave() {
 }
 
 #[test]
-fn a_root_key_is_never_written_under_touch_id_alone() {
+fn a_sealed_only_key_is_never_written_under_touch_id_alone() {
     let dir = TestDir::new();
-    let file = root_file(&dir);
+    let file = sealed_only_file(&dir);
     assert!(matches!(
         file.write(
             &Secret::copy_of(&[4; 32]),
@@ -1265,7 +1269,7 @@ fn a_root_key_is_never_written_under_touch_id_alone() {
                 wait: WAIT,
             }
         ),
-        Err(Error::RootPassphrase { .. })
+        Err(Error::SealedPassphrase { .. })
     ));
     assert!(dir.names().is_empty());
     assert_eq!(stand_in::touches(), 0);
@@ -1304,7 +1308,7 @@ fn a_failed_touch_id_unlock_blames_no_passphrase() {
             .ends_with("wrong passphrase, or the file is damaged")
     );
 
-    let file = KeyFile::device(dir.join("touch.key"));
+    let file = KeyFile::new(dir.join("touch.key"));
     file.write(
         &Secret::copy_of(&[7; 32]),
         Protection::TouchId {
@@ -1353,26 +1357,28 @@ fn prints_touch_id_fixtures() {
     let under = passphrase(PASS);
 
     let dir = TestDir::new();
-    let root = KeyFile::root(dir.path().join("root.key"));
-    root.write(
-        &Secret::copy_of(&[0x21; 32]),
-        Protection::Passphrase(&under),
-    )
-    .unwrap();
-    root.add_lock(Some(with(&under)), NewLock::TouchId { reason, wait: WAIT })
+    let sealed_only = KeyFile::sealed(dir.path().join("sealed-only.key"));
+    sealed_only
+        .write(
+            &Secret::copy_of(&[0x21; 32]),
+            Protection::Passphrase(&under),
+        )
         .unwrap();
-    print("ROOT_PASSPHRASE_AND_TOUCH_ID", 0x21, &root);
+    sealed_only
+        .add_lock(Some(with(&under)), NewLock::TouchId { reason, wait: WAIT })
+        .unwrap();
+    print("SEALED_ONLY_PASSPHRASE_AND_TOUCH_ID", 0x21, &sealed_only);
 
-    let alone = KeyFile::device(dir.path().join("alone"));
+    let alone = KeyFile::new(dir.path().join("alone"));
     alone
         .write(
             &Secret::copy_of(&[0x11; 32]),
             Protection::TouchId { reason, wait: WAIT },
         )
         .unwrap();
-    print("DEVICE_TOUCH_ID_ALONE", 0x11, &alone);
+    print("STANDARD_TOUCH_ID_ALONE", 0x11, &alone);
 
-    let both = KeyFile::device(dir.path().join("both"));
+    let both = KeyFile::new(dir.path().join("both"));
     both.write(
         &Secret::copy_of(&[0x11; 32]),
         Protection::Passphrase(&under),
@@ -1380,5 +1386,5 @@ fn prints_touch_id_fixtures() {
     .unwrap();
     both.add_lock(Some(with(&under)), NewLock::TouchId { reason, wait: WAIT })
         .unwrap();
-    print("DEVICE_PASSPHRASE_AND_TOUCH_ID", 0x11, &both);
+    print("STANDARD_PASSPHRASE_AND_TOUCH_ID", 0x11, &both);
 }
