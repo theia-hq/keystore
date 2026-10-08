@@ -134,7 +134,7 @@ fn the_storage_core_depends_on_registry_crates_only() {
     // A git or path source is how a crate of the family would arrive: none may. The one exception is
     // the enclave crate, which is this repository's own, beside this one, and depends on nothing of
     // this crate's.
-    const OWN: &str = "keystore-enclave={path=\"keystore-enclave\"}";
+    const OWN: &str = "keystore-enclave={path=\"../keystore-enclave\"}";
     let lines = dependency_lines(&manifest);
     assert!(
         lines.len() >= 8,
@@ -156,8 +156,9 @@ fn the_storage_core_depends_on_registry_crates_only() {
 fn the_storage_code_never_names_posture_home_prompting_or_signing() {
     // The words of the concerns that belong to the caller: where a key lives and whether one is made
     // (home, posture, intent, mint, ephemeral), how a person is asked (prompt, tty, stdin, env), and
-    // what the key is for (any signing surface). A storage core that needs one of these is growing a
-    // concern it must not own.
+    // what the key is for (any signing surface, or a role a caller gives a key). A storage core that
+    // needs one of these is growing a concern it must not own. Lowercase `root` and `device` stay
+    // allowed: the superuser a file's owner may be, and a device file a path can name.
     const FORBIDDEN: &[&str] = &[
         "Home",
         "home",
@@ -182,6 +183,10 @@ fn the_storage_code_never_names_posture_home_prompting_or_signing() {
         "Signer",
         "Signature",
         "SigningKey",
+        "Root",
+        "ROOT",
+        "Device",
+        "DEVICE",
     ];
     for (name, source) in shipped_sources() {
         let code = code_only(&source);

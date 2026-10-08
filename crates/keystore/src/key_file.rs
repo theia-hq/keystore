@@ -50,7 +50,7 @@ const READ_CAP: u64 = 4096;
 ///
 /// ```
 /// # fn name(path: std::path::PathBuf) -> keystore::KeyFile {
-/// keystore::KeyFile::device(path)
+/// keystore::KeyFile::new(path)
 /// # }
 /// ```
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -60,23 +60,24 @@ pub struct KeyFile {
 }
 
 impl KeyFile {
-    /// The device key file at `path`: this machine's own key, plain or sealed as its owner chooses.
-    /// A sealed root key at the path is refused by its kind.
-    pub fn device(path: impl Into<PathBuf>) -> Self {
+    /// A standard key file at `path`, written plain or sealed as its owner chooses. A sealed strict
+    /// key at the path is refused by its kind.
+    pub fn new(path: impl Into<PathBuf>) -> Self {
         Self {
             path: path.into(),
-            kind: Kind::Device,
+            kind: Kind::Standard,
         }
     }
 
-    /// The root key file at `path`. Every write seals it: a [`Protection::Plain`] write refuses as
-    /// [`Error::PlainRoot`], and its passphrase lock is never removed. A sealed device key at the path
-    /// is refused by its kind. A plain 32-byte file there still loads, as [`Stored::Plain`], because a
-    /// plain file carries no kind to refuse it by; whether to use it is the caller's decision.
-    pub fn root(path: impl Into<PathBuf>) -> Self {
+    /// The strict key file at `path`. Every write seals it: a [`Protection::Plain`] write refuses as
+    /// [`Error::PlainStrict`], and its passphrase lock is never removed. A sealed standard key at the
+    /// path is refused by its kind. A plain 32-byte file there still loads, as [`Stored::Plain`],
+    /// because a plain file carries no kind to refuse it by; whether to use it is the caller's
+    /// decision.
+    pub fn strict(path: impl Into<PathBuf>) -> Self {
         Self {
             path: path.into(),
-            kind: Kind::Root,
+            kind: Kind::Strict,
         }
     }
 
@@ -122,8 +123,8 @@ impl KeyFile {
     /// so two writers racing for one path cannot both win. A symbolic link at the path is something,
     /// even one that points nowhere: a write never lands through a link.
     ///
-    /// A root key file refuses a [`Protection::Plain`] write as [`Error::PlainRoot`], and a
-    /// [`Protection::TouchId`] write as [`Error::RootPassphrase`], before anything is staged. A
+    /// A strict key file refuses a [`Protection::Plain`] write as [`Error::PlainStrict`], and a
+    /// [`Protection::TouchId`] write as [`Error::StrictPassphrase`], before anything is staged. A
     /// `touch-id` write asks for one touch, to prove the staged file opens.
     pub fn write(&self, secret: &Secret, protection: Protection<'_>) -> Result<(), Error> {
         self.writable(protection)?;
@@ -185,11 +186,11 @@ impl KeyFile {
     /// and any one of them opens the file. The key, and so its public key, never changes, and neither
     /// does the file key the locks wrap, so no other lock needs opening.
     ///
-    /// A root key keeps a lock that opens on another machine, so two changes to one refuse before
-    /// anything is read: sealing a plain root under a `touch-id` lock alone refuses as
-    /// [`Error::RootPassphrase`], and setting its passphrase lock through a `touch-id` lock refuses
-    /// as [`Error::RootPassphraseNeeded`]. Whoever holds only the touch cannot set the passphrase
-    /// that opens every copy of the root.
+    /// A strict key keeps a lock that opens on another machine, so two changes to one refuse before
+    /// anything is read: sealing a plain file as a strict key under a `touch-id` lock alone refuses
+    /// as [`Error::StrictPassphrase`], and setting its passphrase lock through a `touch-id` lock
+    /// refuses as [`Error::StrictPassphraseNeeded`]. Whoever holds only the touch cannot set
+    /// the passphrase that opens every copy of the key.
     ///
     /// In this order, and nothing reaches the next step until the last one held:
     ///
@@ -251,9 +252,9 @@ impl KeyFile {
     }
 
     /// Take the lock of `method` off the key file, opened first with `with`, which may be that same
-    /// lock. The key and the other locks stay as they are. Removing a device key's last
-    /// lock writes it plain; a root key's passphrase lock is never removed, and asking refuses as
-    /// [`Error::RootPassphrase`] before anything is unlocked.
+    /// lock. The key and the other locks stay as they are. Removing a standard key's last lock
+    /// writes it plain; a strict key's passphrase lock is never removed, and asking refuses as
+    /// [`Error::StrictPassphrase`] before anything is unlocked.
     ///
     /// A removal never leaves a file that cannot open here: unless a lock that stays is the one
     /// `with` opens, or can open on this machine, it refuses as [`Error::NoneOpensHere`] before
@@ -287,9 +288,9 @@ impl KeyFile {
             .map_err(|source| real.crypto(source))?;
         match rewritten {
             Some(image) => real.replace(&image, Proof::Opened(&opened), public, &seen),
-            // The last lock is gone, so the file is written plain. A root never gets here, since its
-            // passphrase lock cannot be removed; the plain write still goes through the one check
-            // that refuses a plain root.
+            // The last lock is gone, so the file is written plain. A strict key never gets
+            // here, since its passphrase lock cannot be removed; the plain write still goes through
+            // the one check that refuses a plain strict key.
             None => {
                 real.writable(Protection::Plain)?;
                 let image = real.encode(&opened.secret, Protection::Plain)?;
@@ -298,50 +299,50 @@ impl KeyFile {
         }
     }
 
-    /// Whether this file may be written under `protection`: anything but a plain root key, or a root
-    /// key whose only lock opens on this Mac alone.
+    /// Whether this file may be written under `protection`: anything but a plain strict key,
+    /// or a strict key whose only lock opens on this Mac alone.
     fn writable(&self, protection: Protection<'_>) -> Result<(), Error> {
         match (self.kind, protection) {
-            (Kind::Root, Protection::Plain) => Err(Error::PlainRoot {
+            (Kind::Strict, Protection::Plain) => Err(Error::PlainStrict {
                 path: self.path.clone(),
             }),
-            (Kind::Root, Protection::TouchId { .. }) => Err(Error::RootPassphrase {
+            (Kind::Strict, Protection::TouchId { .. }) => Err(Error::StrictPassphrase {
                 path: self.path.clone(),
             }),
-            (Kind::Root | Kind::Device, _) => Ok(()),
+            (Kind::Strict | Kind::Standard, _) => Ok(()),
         }
     }
 
-    /// Whether `new` may be put on this file through `with`. A device key takes any lock through any
-    /// of its own. A root key keeps a lock that opens on another machine: a plain root's first lock
-    /// must be one, and one is set only through one, so a lock that opens on this Mac alone never
-    /// sets the passphrase that opens every copy.
+    /// Whether `new` may be put on this file through `with`. A standard key takes any lock through
+    /// any of its own. A strict key keeps a lock that opens on another machine: a plain one's
+    /// first lock must be one, and one is set only through one, so a lock that opens on this Mac
+    /// alone never sets the passphrase that opens every copy.
     fn settable(&self, with: Option<Unlock<'_>>, new: NewLock<'_>) -> Result<(), Error> {
         match (self.kind, with) {
-            (Kind::Device, _) => Ok(()),
-            (Kind::Root, None) if !new.method().portable() => Err(Error::RootPassphrase {
+            (Kind::Standard, _) => Ok(()),
+            (Kind::Strict, None) if !new.method().portable() => Err(Error::StrictPassphrase {
                 path: self.path.clone(),
             }),
-            (Kind::Root, Some(with)) if new.method().portable() && !with.method().portable() => {
-                Err(Error::RootPassphraseNeeded {
+            (Kind::Strict, Some(with)) if new.method().portable() && !with.method().portable() => {
+                Err(Error::StrictPassphraseNeeded {
                     path: self.path.clone(),
                 })
             }
-            (Kind::Root, _) => Ok(()),
+            (Kind::Strict, _) => Ok(()),
         }
     }
 
-    /// Whether this file's lock of `method` may be removed: on a root key, only while another lock
-    /// that opens on another machine stays.
+    /// Whether this file's lock of `method` may be removed: on a strict key, only while
+    /// another lock that opens on another machine stays.
     fn removable(&self, envelope: &Envelope, method: Method) -> Result<(), Error> {
         let keeps_portable = envelope
             .methods()
             .any(|kept| kept != method && kept.portable());
         match self.kind {
-            Kind::Root if !keeps_portable => Err(Error::RootPassphrase {
+            Kind::Strict if !keeps_portable => Err(Error::StrictPassphrase {
                 path: self.path.clone(),
             }),
-            Kind::Root | Kind::Device => Ok(()),
+            Kind::Strict | Kind::Standard => Ok(()),
         }
     }
 
