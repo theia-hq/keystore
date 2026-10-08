@@ -157,8 +157,8 @@ fn the_storage_code_never_names_posture_home_prompting_or_signing() {
     // The words of the concerns that belong to the caller: where a key lives and whether one is made
     // (home, posture, intent, mint, ephemeral), how a person is asked (prompt, tty, stdin, env), and
     // what the key is for (any signing surface, or a role a caller gives a key). A storage core that
-    // needs one of these is growing a concern it must not own. Lowercase `root` stays allowed: it is
-    // the superuser a file's owner may be.
+    // needs one of these is growing a concern it must not own. Lowercase `root` and `device` stay
+    // allowed: the superuser a file's owner may be, and a device file a path can name.
     const FORBIDDEN: &[&str] = &[
         "Home",
         "home",
