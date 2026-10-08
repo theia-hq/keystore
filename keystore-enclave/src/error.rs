@@ -37,10 +37,10 @@ pub enum Error {
     /// No touch came within the wait [`Key::agree`](crate::Key::agree) was given, so it closed its
     /// own dialog. Never a cancel: nobody said no. The source is LocalAuthentication's `-9` when
     /// the dialog was up, or `-10` when the deadline came before it.
-    #[error("the Touch ID dialog closed when its wait ran out")]
+    #[error("the wait for a touch ran out")]
     TimedOut(#[source] OsError),
     /// The thread that ends the wait could not be started, so no dialog was shown.
-    #[error("the Touch ID dialog was not shown: its timer could not start")]
+    #[error("the timer for the Touch ID wait could not start, so no dialog was shown")]
     Timer(#[source] std::io::Error),
     /// The key needs a person, and this operation was not allowed to ask one.
     #[error("the key needs a touch, and none could be asked for")]
