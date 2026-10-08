@@ -10,7 +10,12 @@
 //! Mac without asking for anything, and opens the key with a touch. Run it at an unlocked Mac with
 //! Touch ID set up. Delete `<path>` to start again.
 
+use core::time::Duration;
+
 use keystore::{Health, KeyFile, Protection, Secret, Stored, Unlock};
+
+/// How long each Touch ID dialog stays up before it closes by itself.
+const WAIT: Duration = Duration::from_secs(60);
 
 fn main() -> Result<(), Box<dyn core::error::Error>> {
     let Some(path) = std::env::args_os().nth(1) else {
@@ -23,6 +28,7 @@ fn main() -> Result<(), Box<dyn core::error::Error>> {
             &Secret::generate()?,
             Protection::TouchId {
                 reason: "confirm the new touch-id lock opens this test key",
+                wait: WAIT,
             },
         )?;
         println!("wrote a new device key and locked it with touch-id");
@@ -44,6 +50,7 @@ fn main() -> Result<(), Box<dyn core::error::Error>> {
 
     let secret = locked.unlock(Unlock::TouchId {
         reason: "open this test key",
+        wait: WAIT,
     })?;
     // The unlock already refuses a file whose header names another key; this shows it held.
     assert_eq!(secret.public_key(), locked.public_key());

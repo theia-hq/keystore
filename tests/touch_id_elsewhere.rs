@@ -6,6 +6,7 @@
 // A test's setup that fails should fail the test, helpers included.
 #![allow(clippy::unwrap_used)]
 
+use core::time::Duration;
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;
@@ -56,6 +57,9 @@ const GOLDEN_TOUCH_ID: [u8; 460] = [
 /// record, up to the seed's nonce.
 const TOUCH_ID_RECORD: core::ops::Range<usize> = 147..388;
 
+/// The wait a touch would get. Nothing here asks for one: a build without an enclave refuses first.
+const WAIT: Duration = Duration::from_secs(60);
+
 fn passphrase(text: &str) -> Passphrase {
     Passphrase::new(Zeroizing::new(text.as_bytes().to_vec())).unwrap()
 }
@@ -63,6 +67,7 @@ fn passphrase(text: &str) -> Passphrase {
 fn touch() -> Unlock<'static> {
     Unlock::TouchId {
         reason: "open the test key",
+        wait: WAIT,
     }
 }
 
@@ -135,14 +140,20 @@ fn nothing_here_makes_or_opens_a_touch_id_lock_or_leaves_one_alone() {
     ));
     assert!(unavailable(file.add_lock(
         Some(Unlock::Passphrase(&under)),
-        NewLock::TouchId { reason: "lock it" }
+        NewLock::TouchId {
+            reason: "lock it",
+            wait: WAIT,
+        }
     )));
     assert_eq!(fs::read(file.path()).unwrap(), before);
 
     let fresh = KeyFile::device(dir.join("fresh.key"));
     assert!(unavailable(fresh.write(
         &Secret::generate().unwrap(),
-        Protection::TouchId { reason: "write it" }
+        Protection::TouchId {
+            reason: "write it",
+            wait: WAIT,
+        }
     )));
     assert!(fresh.load().unwrap().is_none());
     fs::remove_dir_all(dir).unwrap();

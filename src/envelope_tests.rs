@@ -3,7 +3,7 @@ use zeroize::Zeroizing;
 use super::{Envelope, HEADER_LEN, Opened, Parsed, Refusal, SIGNATURE, assemble, header, parse};
 use crate::error::{FormatError, TouchIdError};
 use crate::kind::Kind;
-use crate::lock::enclave::enclave_tests::{self as stand_in, Touch};
+use crate::lock::enclave::enclave_tests::{self as stand_in, Touch, WAIT};
 use crate::lock::enclave::{EnclaveParams, Policy};
 use crate::lock::passphrase::{Cost, PassphraseParams};
 use crate::lock::{FileKey, Lock, Params};
@@ -772,6 +772,7 @@ fn golden_touch_id_nonce() -> [u8; 24] {
 fn touch() -> Unlock<'static> {
     Unlock::TouchId {
         reason: "open the test key",
+        wait: WAIT,
     }
 }
 

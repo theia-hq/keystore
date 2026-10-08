@@ -7,6 +7,7 @@
 //! so the Mac it is on, what the next touch does, and how many touches were asked for are per test.
 
 use core::cell::Cell;
+use core::time::Duration;
 
 use p256::elliptic_curve::sec1::ToEncodedPoint as _;
 use zeroize::Zeroizing;
@@ -41,12 +42,19 @@ pub(crate) enum Touch {
     Busy,
     /// The key does not load, with an answer that names no code.
     Unrecognised,
+    /// Nobody touches: the wait runs out and the enclave closes its own dialog.
+    Away,
 }
+
+/// The wait the tests give a touch. The stand-in never sleeps on it; it records it, so a test can see
+/// the wait a caller passed is the one the enclave was asked with.
+pub(crate) const WAIT: Duration = Duration::from_secs(60);
 
 thread_local! {
     static MAC: Cell<u8> = const { Cell::new(1) };
     static TOUCH: Cell<Touch> = const { Cell::new(Touch::Matches) };
     static TOUCHES: Cell<u32> = const { Cell::new(0) };
+    static WAITED: Cell<Option<Duration>> = const { Cell::new(None) };
 }
 
 /// Run the rest of this test on Mac `mac`. Every test starts on Mac 1.
@@ -62,6 +70,11 @@ pub(crate) fn touch(touch: Touch) {
 /// How many touches this test has asked for: dialogs shown, never silent checks.
 pub(crate) fn touches() -> u32 {
     TOUCHES.get()
+}
+
+/// The wait the last touch in this test was asked with, if any was asked for.
+pub(crate) fn waited() -> Option<Duration> {
+    WAITED.get()
 }
 
 /// The stand-in enclave of the Mac this test is on.
@@ -134,26 +147,35 @@ impl StandInKey {
         let shape = match TOUCH.get() {
             Touch::Matches if dialog => return Ok(()),
             Touch::Cancelled if dialog => Shape::LocalAuthentication(-2),
-            Touch::Matches | Touch::Cancelled | Touch::TurnedDownAfterDialog if !dialog => {
+            Touch::Away if dialog => Shape::TimedOut,
+            Touch::Matches | Touch::Cancelled | Touch::TurnedDownAfterDialog | Touch::Away
+                if !dialog =>
+            {
                 Shape::LocalAuthentication(NEEDS_A_PERSON)
             }
             Touch::FingersChanged | Touch::TurnedDownAfterDialog => Shape::Token(-3),
             Touch::ScreenLocked => Shape::LocalAuthentication(-4),
             Touch::LockedOut => Shape::LocalAuthentication(-8),
             Touch::Busy => Shape::Status(-25308),
-            Touch::Matches | Touch::Cancelled | Touch::Unrecognised => Shape::Other,
+            Touch::Matches | Touch::Cancelled | Touch::Away | Touch::Unrecognised => Shape::Other,
         };
         Err(refused(shape))
     }
 }
 
 impl Agree for StandInKey {
-    fn agree(&self, peer: &Point, reason: &str) -> Result<Zeroizing<[u8; SECRET_LEN]>, Refused> {
+    fn agree(
+        &self,
+        peer: &Point,
+        reason: &str,
+        wait: Duration,
+    ) -> Result<Zeroizing<[u8; SECRET_LEN]>, Refused> {
         assert!(
             !reason.is_empty(),
             "a touch is never asked for with no reason"
         );
         TOUCHES.set(TOUCHES.get() + 1);
+        WAITED.set(Some(wait));
         Self::answer(true)?;
         // The real enclave refuses a peer off the curve the same way, as its own failure.
         let peer =
@@ -187,7 +209,7 @@ fn a_touch_makes_the_key_the_lock_was_made_with() {
     let (params, kek) = EnclaveParams::enroll(&StandIn).unwrap();
     // Making the lock asked for no touch; opening it asks for exactly one.
     assert_eq!(touches(), 0);
-    let opened = params.kek(&StandIn, "open the test key").unwrap();
+    let opened = params.kek(&StandIn, "open the test key", WAIT).unwrap();
     assert_eq!(touches(), 1);
     assert_eq!(opened.bytes(), kek.bytes());
 }
@@ -267,7 +289,7 @@ fn another_macs_lock_does_not_load_here_and_asks_for_no_touch() {
     on_mac(2);
     assert_eq!(params.health(&StandIn), Health::Dead);
     assert!(matches!(
-        params.kek(&StandIn, "open the test key"),
+        params.kek(&StandIn, "open the test key", WAIT),
         Err(crate::error::MethodError::TouchId(TouchIdError::NotHere(_)))
     ));
     assert_eq!(touches(), 0);
@@ -293,6 +315,12 @@ fn each_probe_row_reads_as_ruled() {
         ),
         (Raised::System(STATUS_DOMAIN, -25308), Health::Unchecked),
         (Raised::OtherKey, Health::Dead),
+        // A wait that ran out, or a dialog the program closed, says nothing of the key.
+        (Raised::TimedOut, Health::Unchecked),
+        (
+            Raised::System(LOCAL_AUTHENTICATION_DOMAIN, -9),
+            Health::Unchecked,
+        ),
         // A domain or a refusal not named: cannot check now, never dead.
         (Raised::System("NSCocoaErrorDomain", -3), Health::Unchecked),
         (Raised::System("unknown", 0), Health::Unchecked),
@@ -327,13 +355,13 @@ fn a_lock_that_stops_opening_when_a_finger_is_enrolled_opens_again_when_it_is_re
     assert_eq!(params.health(&StandIn), Health::Dead);
     touch(Touch::Matches);
     assert_eq!(params.health(&StandIn), Health::Live);
-    assert!(params.kek(&StandIn, "open the test key").is_ok());
+    assert!(params.kek(&StandIn, "open the test key", WAIT).is_ok());
 }
 
 #[test]
 fn a_key_the_enclave_refuses_is_refused_before_a_dialog_and_never_as_a_cancel() {
     let (params, _) = enrolled();
-    let refusal = |params: &EnclaveParams| match params.kek(&StandIn, "open the test key") {
+    let refusal = |params: &EnclaveParams| match params.kek(&StandIn, "open the test key", WAIT) {
         Err(crate::error::MethodError::TouchId(error)) => error,
         Err(other) => panic!("expected a touch-id refusal, found {other:?}"),
         Ok(_) => panic!("the key opened"),
@@ -359,6 +387,41 @@ fn a_key_the_enclave_refuses_is_refused_before_a_dialog_and_never_as_a_cancel() 
     assert!(matches!(refusal(&params), TouchIdError::Declined(_)));
     touch(Touch::LockedOut);
     assert!(matches!(refusal(&params), TouchIdError::Enclave(_)));
+
+    // Nobody touched before the wait ran out: told apart from a cancel, after one dialog.
+    touch(Touch::Away);
+    let before = touches();
+    assert!(matches!(refusal(&params), TouchIdError::TimedOut(_)));
+    assert_eq!(touches(), before + 1);
+}
+
+/// A dialog the program closed (`-9`) without the wait running out is never a person's no: the
+/// enclave names its own deadline, so this code reaching the core is the enclave failing.
+#[test]
+fn a_dialog_the_program_closed_is_never_read_as_a_cancel() {
+    for code in [-9, -10] {
+        assert!(
+            matches!(
+                refused(Shape::LocalAuthentication(code)).into_error(),
+                TouchIdError::Enclave(_)
+            ),
+            "{code} read as something other than the enclave's failure"
+        );
+    }
+    // The enclave's own deadline, through the one reading of what it raised.
+    assert!(matches!(
+        refused(shape_of(Raised::TimedOut)).into_error(),
+        TouchIdError::TimedOut(_)
+    ));
+}
+
+#[test]
+fn the_wait_reaches_the_enclave_as_given() {
+    let (params, _) = enrolled();
+    for wait in [Duration::from_secs(7), Duration::from_millis(1500)] {
+        params.kek(&StandIn, "open the test key", wait).unwrap();
+        assert_eq!(waited(), Some(wait));
+    }
 }
 
 #[test]
@@ -393,8 +456,43 @@ fn the_secure_enclave_opens_what_it_locked_once_per_touch() {
     assert_eq!(params.health(&SecureEnclave), Health::Live);
     for time in ["first", "second"] {
         let opened = params
-            .kek(&SecureEnclave, &format!("open a test key, the {time} time"))
+            .kek(
+                &SecureEnclave,
+                &format!("open a test key, the {time} time"),
+                WAIT,
+            )
             .unwrap();
         assert_eq!(opened.bytes(), kek.bytes());
     }
+}
+
+/// The real enclave, with nobody at the sensor: the dialog shows, the wait runs out, and the lock's
+/// touch fails as a wait that ran out, never as a cancel, with the dialog closed by the call itself.
+/// Run on an unlocked Mac with Touch ID: `cargo test -p keystore -- --ignored the_secure_enclave`.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "needs a Mac with a Secure Enclave and Touch ID set up; shows the dialog, and no finger"]
+fn the_secure_enclave_closes_its_dialog_when_the_wait_runs_out() {
+    use std::time::Instant;
+
+    use super::SecureEnclave;
+
+    let (params, _) = EnclaveParams::enroll(&SecureEnclave).unwrap();
+    let wait = Duration::from_secs(2);
+    let start = Instant::now();
+    let opened = params.kek(
+        &SecureEnclave,
+        "test a dialog that closes by itself; do not touch",
+        wait,
+    );
+    let took = start.elapsed();
+    match opened {
+        Err(crate::error::MethodError::TouchId(TouchIdError::TimedOut(_))) => {}
+        Err(other) => panic!("expected a wait that ran out, found {other:?}"),
+        Ok(_) => panic!("the key opened with nobody at the sensor"),
+    }
+    assert!(
+        took >= wait && took < wait + Duration::from_millis(500),
+        "returned after {took:?}"
+    );
 }

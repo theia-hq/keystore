@@ -1,4 +1,5 @@
 use core::fmt;
+use core::time::Duration;
 
 use crate::passphrase::Passphrase;
 
@@ -57,6 +58,9 @@ pub enum Unlock<'a> {
     TouchId {
         /// Why the touch is asked for.
         reason: &'a str,
+        /// How long the dialog stays up. With no touch by then, it closes and the unlock fails as
+        /// [`TouchIdError::TimedOut`](crate::TouchIdError::TimedOut).
+        wait: Duration,
     },
 }
 
@@ -82,6 +86,8 @@ pub enum NewLock<'a> {
     TouchId {
         /// Why the touch that proves the new lock is asked for.
         reason: &'a str,
+        /// How long that dialog stays up, as [`Unlock::TouchId`]'s.
+        wait: Duration,
     },
 }
 
@@ -98,7 +104,7 @@ impl<'a> NewLock<'a> {
     pub(crate) const fn opener(self) -> Unlock<'a> {
         match self {
             Self::Passphrase(passphrase) => Unlock::Passphrase(passphrase),
-            Self::TouchId { reason } => Unlock::TouchId { reason },
+            Self::TouchId { reason, wait } => Unlock::TouchId { reason, wait },
         }
     }
 }
@@ -117,5 +123,7 @@ pub enum Protection<'a> {
     TouchId {
         /// Why the touch is asked for.
         reason: &'a str,
+        /// How long the dialog stays up, as [`Unlock::TouchId`]'s.
+        wait: Duration,
     },
 }

@@ -25,6 +25,9 @@
 //! points are checked as curve points where they are used.
 
 #[cfg(any(test, target_os = "macos"))]
+use core::time::Duration;
+
+#[cfg(any(test, target_os = "macos"))]
 use zeroize::Zeroizing;
 
 use crate::error::FormatError;
@@ -217,8 +220,14 @@ pub(crate) trait Enclave {
 /// An enclave key, loaded.
 #[cfg(any(test, target_os = "macos"))]
 pub(crate) trait Agree {
-    /// ECDH with `peer`: the shared point's x-coordinate. Asks for a touch, with `reason` shown.
-    fn agree(&self, peer: &Point, reason: &str) -> Result<Zeroizing<[u8; SECRET_LEN]>, Refused>;
+    /// ECDH with `peer`: the shared point's x-coordinate. Asks for a touch, with `reason` shown, and
+    /// closes the dialog itself after `wait`, refusing as [`Shape::TimedOut`].
+    fn agree(
+        &self,
+        peer: &Point,
+        reason: &str,
+        wait: Duration,
+    ) -> Result<Zeroizing<[u8; SECRET_LEN]>, Refused>;
 
     /// Ask for the agreement with no dialog allowed: `Ok` when the enclave refuses only for want of a
     /// person (LocalAuthentication's `-1004`), and its refusal otherwise.
@@ -226,10 +235,12 @@ pub(crate) trait Agree {
 }
 
 /// LocalAuthentication's codes for a dialog the person, or the system, closed: the touch did not
-/// match, the person cancelled, the system cancelled (the screen locked with the dialog up), or the
-/// program did.
+/// match, the person cancelled, or the system cancelled (the screen locked with the dialog up). A
+/// dialog the program closed (`-9`) is not one: the program closes its dialog only when the wait runs
+/// out, which the enclave names itself ([`Shape::TimedOut`]), so a `-9` that reaches here is the
+/// enclave's failure, never a person's no.
 #[cfg(any(test, target_os = "macos"))]
-const DECLINED: [isize; 4] = [-1, -2, -4, -9];
+const DECLINED: [isize; 3] = [-1, -2, -4];
 
 /// How an enclave refused: by whom, and with what code. Read here, and nowhere else, into what the
 /// refusal means.
@@ -245,6 +256,8 @@ pub(crate) enum Shape {
     LocalAuthentication(isize),
     /// Security's status domain refused, with this code.
     Status(isize),
+    /// No touch came within the wait, and the enclave closed its own dialog.
+    TimedOut,
     /// Any other refusal: one the enclave gave no code for, or this side's own.
     Other,
 }
@@ -259,7 +272,11 @@ impl Shape {
             // The one refusal a silent check is built to get: the key is here, and needs a touch.
             Self::LocalAuthentication(NEEDS_A_PERSON) => Health::Live,
             Self::NotLoaded | Self::Token(_) => Health::Dead,
-            Self::LocalAuthentication(_) | Self::Status(_) | Self::Other => Health::Unchecked,
+            // A silent check shows no dialog and so has no wait to run out; should one say so, it
+            // says nothing of the key.
+            Self::LocalAuthentication(_) | Self::Status(_) | Self::TimedOut | Self::Other => {
+                Health::Unchecked
+            }
         }
     }
 }
@@ -285,6 +302,8 @@ pub(crate) enum Raised<'a> {
     OtherKey,
     /// The system refused, in this domain, with this code.
     System(&'a str, isize),
+    /// The wait ran out, and the enclave closed its own dialog.
+    TimedOut,
     /// A refusal with no system code.
     Unnamed,
 }
@@ -295,6 +314,7 @@ pub(crate) enum Raised<'a> {
 pub(crate) fn shape_of(raised: Raised<'_>) -> Shape {
     match raised {
         Raised::OtherKey => Shape::NotLoaded,
+        Raised::TimedOut => Shape::TimedOut,
         Raised::System(TOKEN_DOMAIN, code) => Shape::Token(code),
         Raised::System(LOCAL_AUTHENTICATION_DOMAIN, code) => Shape::LocalAuthentication(code),
         Raised::System(STATUS_DOMAIN, code) => Shape::Status(code),
@@ -311,15 +331,16 @@ pub(crate) struct Refused {
 
 #[cfg(any(test, target_os = "macos"))]
 impl Refused {
-    /// The refusal as a caller tells it: a key that does not open here, a person who said no, or the
-    /// enclave failing. A touch the enclave turns down after the dialog (its token's refusal) is the
-    /// first, never a cancel.
+    /// The refusal as a caller tells it: a key that does not open here, a person who said no, a wait
+    /// that ran out, or the enclave failing. A touch the enclave turns down after the dialog (its
+    /// token's refusal) is the first, never a cancel, and a wait that ran out is never a cancel either.
     fn into_error(self) -> TouchIdError {
         match self.shape {
             Shape::NotLoaded | Shape::Token(_) => TouchIdError::NotHere(self.source),
             Shape::LocalAuthentication(code) if is_declined(code) => {
                 TouchIdError::Declined(self.source)
             }
+            Shape::TimedOut => TouchIdError::TimedOut(self.source),
             Shape::LocalAuthentication(_) | Shape::Status(_) | Shape::Other => {
                 TouchIdError::Enclave(self.source)
             }
@@ -379,12 +400,18 @@ impl EnclaveParams {
         Ok((params, kek))
     }
 
-    /// The key a touch makes under these parameters, through `enclave`, with `reason` in the dialog.
+    /// The key a touch makes under these parameters, through `enclave`, with `reason` in the dialog
+    /// for at most `wait`.
     ///
     /// The key is asked first with no dialog allowed: one the enclave refuses outright (another
     /// Mac's, a damaged one, one made under other enrolled fingers) is refused here, before a dialog
     /// that could not open it. A key that cannot be checked now is still asked with the dialog.
-    pub(crate) fn kek(&self, enclave: &impl Enclave, reason: &str) -> Result<Kek, MethodError> {
+    pub(crate) fn kek(
+        &self,
+        enclave: &impl Enclave,
+        reason: &str,
+        wait: Duration,
+    ) -> Result<Kek, MethodError> {
         let key = enclave
             .load(&self.blob, &self.enclave_key)
             .map_err(Refused::into_error)?;
@@ -394,7 +421,7 @@ impl EnclaveParams {
             return Err(refused.into_error().into());
         }
         let shared = key
-            .agree(&self.one_time, reason)
+            .agree(&self.one_time, reason, wait)
             .map_err(Refused::into_error)?;
         Ok(derive(&shared[..], &self.one_time, &self.enclave_key)?)
     }
@@ -479,8 +506,13 @@ impl Enclave for SecureEnclave {
 
 #[cfg(target_os = "macos")]
 impl Agree for keystore_enclave::Key {
-    fn agree(&self, peer: &Point, reason: &str) -> Result<Zeroizing<[u8; SECRET_LEN]>, Refused> {
-        keystore_enclave::Key::agree(self, peer.bytes(), reason).map_err(refused)
+    fn agree(
+        &self,
+        peer: &Point,
+        reason: &str,
+        wait: Duration,
+    ) -> Result<Zeroizing<[u8; SECRET_LEN]>, Refused> {
+        keystore_enclave::Key::agree(self, peer.bytes(), reason, wait).map_err(refused)
     }
 
     fn check(&self) -> Result<(), Refused> {
@@ -498,6 +530,7 @@ fn refused(error: keystore_enclave::Error) -> Refused {
     // with nobody asked) cannot come from a lock this crate made, and stays unnamed.
     let shape = shape_of(match &error {
         Error::OtherKey => Raised::OtherKey,
+        Error::TimedOut => Raised::TimedOut,
         Error::Load(os) | Error::Declined(os) | Error::NotInteractive(os) | Error::Agree(os) => {
             Raised::System(os.domain(), os.code())
         }
