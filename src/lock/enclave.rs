@@ -530,7 +530,7 @@ fn refused(error: keystore_enclave::Error) -> Refused {
     // with nobody asked) cannot come from a lock this crate made, and stays unnamed.
     let shape = shape_of(match &error {
         Error::OtherKey => Raised::OtherKey,
-        Error::TimedOut => Raised::TimedOut,
+        Error::TimedOut(_) => Raised::TimedOut,
         Error::Load(os) | Error::Declined(os) | Error::NotInteractive(os) | Error::Agree(os) => {
             Raised::System(os.domain(), os.code())
         }

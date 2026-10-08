@@ -58,9 +58,10 @@ fn a_refusal_reads_as_what_the_system_said() {
 #[test]
 fn only_a_pulled_context_after_the_deadline_reads_as_a_timeout() {
     let after = |code, fired| past(read(local_authentication(code)), fired);
-    // The deadline pulled the context with the dialog up (-9), or before it showed (-10).
-    assert!(matches!(after(-9, true), Error::TimedOut));
-    assert!(matches!(after(-10, true), Error::TimedOut));
+    // The deadline pulled the context with the dialog up (-9), or before it showed (-10), and the
+    // timeout carries which one.
+    assert!(matches!(after(-9, true), Error::TimedOut(os) if os.code() == -9));
+    assert!(matches!(after(-10, true), Error::TimedOut(os) if os.code() == -10));
     // Without the deadline, the same codes are the system's failure.
     assert!(matches!(after(-9, false), Error::Agree(_)));
     assert!(matches!(after(-10, false), Error::Agree(_)));

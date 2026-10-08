@@ -159,12 +159,15 @@ impl Cancel<'_> {
     }
 }
 
-// SAFETY: the timer thread does one thing through this, `-[LAContext invalidate]`, which is the
-// message made to be sent while an evaluation started through the context is in flight on another
-// thread: it is how an evaluation is cancelled. On macOS it closes the Touch ID dialog and returns the
-// blocked `SecKeyCopyKeyExchangeResult` with `-9` about 10 ms after the send. The borrow is live for
-// every use: the timer is a scoped thread, joined before `within` returns and so before the context
-// can drop. Nothing else crosses: no retain, no release, no other message.
+// SAFETY: the timer thread does one thing through this, `-[LAContext invalidate]`, which Apple
+// defines as the cancel for an evaluation in flight on another thread (`LAContext.h`):
+// "Invalidation terminates any existing policy evaluation and the respective call will fail with
+// LAErrorAppCancel" (`-9`); an evaluation after it "will fail with LAErrorInvalidContext" (`-10`);
+// and "Invalidating a context that has been already invalidated has no effect", so the drop's own
+// send is safe after it. The borrow is live for every use: the timer is a scoped thread, joined
+// before `within` returns and so before the context can drop. Nothing else crosses: no retain, no
+// release, no other message. (Measured, not relied on: the dialog closes and the blocked call
+// returns about 10 ms after the send.)
 unsafe impl Send for Cancel<'_> {}
 
 /// `objc_msgSend` as a call of no arguments returning an object.
@@ -229,3 +232,7 @@ unsafe fn send_bool(receiver: Id, selector: *const c_char, argument: bool) {
         call(receiver, sel_registerName(selector), argument);
     }
 }
+
+#[cfg(test)]
+#[path = "context_tests.rs"]
+mod context_tests;

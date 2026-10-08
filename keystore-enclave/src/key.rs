@@ -289,7 +289,7 @@ fn past(error: Error, fired: bool) -> Error {
         Error::Agree(os)
             if fired && PULLED.iter().any(|&code| os.is_local_authentication(code)) =>
         {
-            Error::TimedOut
+            Error::TimedOut(os)
         }
         error => error,
     }

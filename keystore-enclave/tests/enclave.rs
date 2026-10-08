@@ -72,7 +72,7 @@ fn deadline_dismisses_the_dialog() {
             wait,
         );
         let took = start.elapsed();
-        assert!(matches!(agreed, Err(Error::TimedOut)), "{agreed:?}");
+        assert!(matches!(agreed, Err(Error::TimedOut(_))), "{agreed:?}");
         assert!(
             took >= wait && took < wait + Duration::from_millis(500),
             "returned after {took:?}"

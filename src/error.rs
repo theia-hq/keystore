@@ -424,7 +424,8 @@ impl CryptoError {
 /// Why a `touch-id` lock could not be made or opened.
 ///
 /// The variants are the cases a caller tells a person apart: this machine cannot do it at all, the
-/// lock is not this Mac's, the person said no, or the person did not answer in time. The enclave's own error rides the `source()` chain.
+/// lock is not this Mac's, the person said no, or the person did not answer in time. The enclave's
+/// own error rides the `source()` chain.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum TouchIdError {
@@ -444,7 +445,7 @@ pub enum TouchIdError {
     Declined(#[source] EnclaveError),
     /// No touch came within the wait the unlock carried, so the dialog was closed. Never a cancel:
     /// nobody said no, and nobody may still be there.
-    #[error("no touch came within the wait")]
+    #[error("no touch came in time")]
     TimedOut(#[source] EnclaveError),
     /// The enclave could not make the key or agree the secret.
     #[error("the Secure Enclave failed")]

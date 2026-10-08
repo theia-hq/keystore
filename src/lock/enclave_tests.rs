@@ -415,6 +415,23 @@ fn a_dialog_the_program_closed_is_never_read_as_a_cancel() {
     ));
 }
 
+/// The real enclave crate's timeout, through the macOS adapter: it must reach the core as a wait
+/// that ran out, not fall through to an unnamed failure. Needs no enclave, only the error value.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_timeout_from_the_enclave_crate_reads_as_a_timeout() {
+    for code in [-9, -10] {
+        let error = keystore_enclave::Error::TimedOut(keystore_enclave::OsError::new(
+            LOCAL_AUTHENTICATION_DOMAIN,
+            code,
+            "",
+        ));
+        let refusal = super::refused(error);
+        assert_eq!(refusal.shape, Shape::TimedOut, "{code}");
+        assert!(matches!(refusal.into_error(), TouchIdError::TimedOut(_)));
+    }
+}
+
 #[test]
 fn the_wait_reaches_the_enclave_as_given() {
     let (params, _) = enrolled();
