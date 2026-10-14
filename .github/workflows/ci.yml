@@ -31,7 +31,7 @@ jobs:
         with:
           tool: cargo-deny@0.20.2
       - name: cargo-deny (sources)
-        run: cargo deny check sources
+        run: cargo deny --all-features check sources
   # The platform job: build, lint and run every test on macOS, where the platform locks live and the
   # enclave crate compiles, so a change that breaks there fails here and not on a user's Mac. Its Macs
   # are virtual and have no Secure Enclave, so the tests that need one are ignored and run by hand.
