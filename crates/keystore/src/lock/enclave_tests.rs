@@ -9,7 +9,7 @@
 use core::cell::Cell;
 use core::time::Duration;
 
-use p256::elliptic_curve::sec1::ToEncodedPoint as _;
+use p256::elliptic_curve::sec1::ToSec1Point as _;
 use zeroize::Zeroizing;
 
 use super::{
@@ -98,7 +98,7 @@ fn refused(shape: Shape) -> Refused {
 
 pub(crate) fn point_of(key: &p256::SecretKey) -> Point {
     let mut bytes = [0; POINT_LEN];
-    bytes.copy_from_slice(key.public_key().to_encoded_point(false).as_bytes());
+    bytes.copy_from_slice(key.public_key().to_sec1_point(false).as_bytes());
     Point::parse(bytes).unwrap()
 }
 
@@ -202,6 +202,62 @@ fn enrolled() -> (EnclaveParams, Vec<u8>) {
     let mut bytes = Vec::new();
     params.write(&mut bytes);
     (params, bytes)
+}
+
+#[test]
+fn secret_scalars_exclude_zero_and_the_curve_order() {
+    // SEC 2's P-256 order: the largest accepted scalar is one less, not the order itself.
+    let order = [
+        0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xbc, 0xe6, 0xfa, 0xad, 0xa7, 0x17, 0x9e, 0x84, 0xf3, 0xb9, 0xca, 0xc2, 0xfc, 0x63,
+        0x25, 0x51,
+    ];
+    for scalar in [[0; SECRET_LEN], order, [0xff; SECRET_LEN]] {
+        assert!(p256::SecretKey::from_slice(&scalar).is_err());
+    }
+    let mut one = [0; SECRET_LEN];
+    one[SECRET_LEN - 1] = 1;
+    let mut last = order;
+    last[SECRET_LEN - 1] -= 1;
+    for scalar in [one, last] {
+        let key = p256::SecretKey::from_slice(&scalar).unwrap();
+        assert_eq!(&key.to_bytes()[..], &scalar);
+    }
+}
+
+#[test]
+fn an_off_curve_enclave_point_refuses_enrollment_without_a_touch() {
+    let mut bytes = [0; POINT_LEN];
+    bytes[0] = Point::UNCOMPRESSED;
+    // The form parses, but (0, 0) is not on P-256: enrollment must reach curve validation.
+    let off_curve = Point::parse(bytes).unwrap();
+    let one_time = p256::SecretKey::from_slice(&[1; SECRET_LEN]).unwrap();
+    assert!(matches!(
+        EnclaveParams::enroll_with(
+            Policy::BiometryCurrentSet,
+            blob(1, &[1; SECRET_LEN]),
+            off_curve,
+            &one_time,
+        ),
+        Err(crate::error::MethodError::TouchId(TouchIdError::Enclave(_)))
+    ));
+    assert_eq!(touches(), 0);
+}
+
+#[test]
+fn an_off_curve_one_time_point_refuses_agreement_as_an_enclave_failure() {
+    let mut bytes = [0; POINT_LEN];
+    bytes[0] = Point::UNCOMPRESSED;
+    let off_curve = Point::parse(bytes).unwrap();
+    let key = StandInKey(p256::SecretKey::from_slice(&[1; SECRET_LEN]).unwrap());
+    assert!(matches!(
+        key.agree(&off_curve, "open the test key", WAIT),
+        Err(Refused {
+            shape: Shape::Other,
+            ..
+        })
+    ));
+    assert_eq!(touches(), 1);
 }
 
 #[test]
