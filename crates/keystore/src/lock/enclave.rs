@@ -382,12 +382,12 @@ impl EnclaveParams {
         enclave_key: Point,
         one_time: &p256::SecretKey,
     ) -> Result<(Self, Kek), MethodError> {
-        use p256::elliptic_curve::sec1::ToEncodedPoint as _;
+        use p256::elliptic_curve::sec1::ToSec1Point as _;
 
         let peer = p256::PublicKey::from_sec1_bytes(enclave_key.bytes())
             .map_err(|_| unusable(crate::error::Unusable::Point))?;
         let mut encoded = [0; POINT_LEN];
-        encoded.copy_from_slice(one_time.public_key().to_encoded_point(false).as_bytes());
+        encoded.copy_from_slice(one_time.public_key().to_sec1_point(false).as_bytes());
         let one_time_point = Point(encoded);
         let shared = p256::ecdh::diffie_hellman(one_time.to_nonzero_scalar(), peer.as_affine());
         let kek = derive(shared.raw_secret_bytes(), &one_time_point, &enclave_key)?;
